@@ -15,6 +15,8 @@
 import { docMetaRepo } from '../db/repos/docMetaRepo.js'
 import { getRedis, rkey } from '../db/redis.js'
 import { Singleflight, TtlCache } from '../util/singleflight.js'
+import { config } from '../config/env.js'
+import { enqueueDocIndex, isSearchIndexedDoc } from '../search/docIndexQueue.js'
 
 const REDIS_EPOCH_TTL_SECONDS = 30
 const LOCAL_TTL_MS = 2_000
@@ -105,6 +107,18 @@ export async function refreshAndPublish(
     await redis.publish(epochInvalidateChannel(), JSON.stringify(event))
   } catch {
     /* broadcast best-effort; beforeHandleMessage recheck is the backstop */
+  }
+
+  // §3.3b (acl search-index seam — the acl-channel producer). EVERY permission
+  // change (add/remove member, role change, invite accept, forward grant, share
+  // change, soft-delete) converges here, so this single point feeds the search
+  // indexer's ACL sync: enqueue an 'acl' signal so the consumer re-reads
+  // owner/member/share/status and partial-updates the index WITHOUT re-reading
+  // the body. Best-effort, fire-and-forget, gated OFF by default; skipped for
+  // non-indexed docs (e.g. whiteboards). Must never disturb the invalidation
+  // broadcast above.
+  if (config.search.indexEnabled && isSearchIndexedDoc(documentName)) {
+    void enqueueDocIndex(documentName, 'acl')
   }
 }
 

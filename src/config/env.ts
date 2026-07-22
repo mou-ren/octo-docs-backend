@@ -27,6 +27,16 @@ function numMin(name: string, fallback: number, min: number): number {
   return Math.max(min, n)
 }
 
+// Positive-integer env var clamped to at least `min`. Unlike numMin this also
+// floors fractional input and rejects non-finite values (Infinity/NaN), so a
+// bogus value can't reach a consumer (e.g. a Redis LTRIM count) as a fraction
+// or infinity and either silently defeat the cap or throw a command error.
+export function posIntMin(name: string, fallback: number, min: number): number {
+  const n = num(name, fallback)
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(min, Math.floor(n))
+}
+
 function bool(name: string, fallback: boolean): boolean {
   const v = process.env[name]
   if (v === undefined || v === '') return fallback
@@ -648,6 +658,20 @@ export const config = {
     retainCount: num('AUTO_RETAIN_COUNT', 50),
     // retention: drop auto rows older than this many days.
     retainDays: num('AUTO_RETAIN_DAYS', 7),
+  },
+
+  // Full-text search index feed (§3.3a). When enabled, the collab
+  // afterStoreDocument hook enqueues a tiny {documentName} signal onto a Redis
+  // list for a separate indexer to consume. Default OFF (gray release): while
+  // disabled the hook is inert, so the queue never grows before a consumer
+  // exists.
+  search: {
+    indexEnabled: bool('SEARCH_INDEX_ENABLED', false),
+    // Safety cap on the shared-Redis index LIST: each push LTRIMs to this many
+    // newest entries so an absent/lagging consumer can't grow it without bound
+    // and OOM the shared instance. Under sustained overflow the oldest signals
+    // are dropped (best-effort). Rollout: deploy the consumer before enabling.
+    queueMax: posIntMin('SEARCH_INDEX_QUEUE_MAX', 100_000, 1),
   },
 
   // FEAT-B recent-view retention. doc_view_history rows are pruned synchronously
