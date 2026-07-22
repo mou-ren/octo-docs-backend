@@ -186,6 +186,30 @@ export const config = {
     prefix: str('REDIS_PREFIX', 'octo-docs'),
   },
 
+  // Full-text search (P4). OpenSearch holds the doc/sheet/board body index
+  // (`octo-doc`, written by the independent octo-doc-indexer); the backend only
+  // READS it. MySQL computes the visibility constraint (private doc_id set +
+  // isSpaceMember), which is pushed down into the OS query as a filter so OS
+  // returns only hits the caller may see and paginates them. No permissions live
+  // in OS. Disabled by default (gray release): with SEARCH_ENABLED=false the POST
+  // /docs/search route returns 503 and never connects to OpenSearch.
+  search: {
+    // Master switch. false => POST /docs/search returns 503 (search unavailable).
+    enabled: bool('SEARCH_ENABLED', false),
+    // OpenSearch node URL (single node; same cluster the indexer writes to).
+    opensearchNode: str('OPENSEARCH_NODE', 'http://127.0.0.1:9200'),
+    // Index the indexer writes doc bodies to.
+    opensearchIndex: str('OPENSEARCH_INDEX', 'octo-doc'),
+    // Optional basic-auth credentials. Empty (default) => no auth header.
+    opensearchUsername: str('OPENSEARCH_USERNAME', ''),
+    opensearchPassword: str('OPENSEARCH_PASSWORD', ''),
+    // Upper bound on candidates pulled from OS before the DB permission
+    // intersection. Bounds the in-memory filter + pagination work per query.
+    maxCandidates: num('SEARCH_MAX_CANDIDATES', 200),
+    // Upper bound a caller's pageSize is clamped to.
+    pageSizeMax: num('SEARCH_PAGE_SIZE_MAX', 50),
+  },
+
   // Per-IP request throttle applied to the REST route chains (§8.4). Guards the
   // authenticated/authorizing metadata endpoints on both the human (/api/v1/docs)
   // and bot (/v1/bot/docs) mounts against abuse. Keyed on the real client IP,

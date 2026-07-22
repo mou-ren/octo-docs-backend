@@ -389,6 +389,62 @@ export const docMetaRepo = {
     return { total, items }
   },
 
+  /**
+   * Permission down-push for full-text search (P4, §5.3(a) / §5.4). Compute the
+   * caller's PRIVATE / EXPLICITLY-GRANTED visible doc_id set in `spaceId` — the
+   * SMALL set (docs the caller owns OR is a direct doc_member of) — so the route
+   * can push it into OpenSearch as a `terms: { doc_id: [...] }` filter branch.
+   *
+   * Deliberately does NOT enumerate anyone_in_space (space-share) docs: those can
+   * be very many and would blow up the terms list. Space-share is handled OS-side
+   * by the `share_scope=1` field branch (added only for confirmed members), never
+   * enumerated here (§5.3(b)).
+   *
+   * owner scope matches listForUser's owner='me' ownerSet: owner_id IN (uid,
+   * ...ownedBots) (de-duped, empties stripped), so a user's own bot-created private
+   * docs count as visible. status=1 (active only). Optional docType narrows to a
+   * multi-value doc_type set. Returns the doc_id strings.
+   */
+  async listVisibleDocIdSet(params: {
+    uid: string
+    spaceId: string
+    ownedBots?: string[]
+    docType?: string[]
+  }): Promise<string[]> {
+    // owner set: caller + any bot they own, de-duped, empties stripped — same
+    // scope as listForUser owner='me', so bot-created private docs are visible.
+    const ownerSet = [
+      params.uid,
+      ...(params.ownedBots ?? []).filter((b) => typeof b === 'string' && b !== ''),
+    ].filter((v, i, arr) => arr.indexOf(v) === i)
+
+    const docTypes = (params.docType ?? []).filter((t) => typeof t === 'string' && t !== '')
+
+    // Bind order MUST match placeholder order (mysql2 execute, errno 1210 on a
+    // mismatch): JOIN `dm.uid = ?` first, then space_id, then the optional
+    // doc_type IN (...), then the owner IN (...) set in the visibility tail.
+    const ownerPlaceholders = ownerSet.map(() => '?').join(', ')
+    const where = ['m.status = 1', 'm.space_id = ?']
+    const args: unknown[] = [params.uid, params.spaceId]
+    if (docTypes.length > 0) {
+      where.push(`m.doc_type IN (${docTypes.map(() => '?').join(', ')})`)
+      args.push(...docTypes)
+    }
+    // Private / explicitly-granted only: owner OR direct doc_member. NO share_scope
+    // branch (space-share is pushed to OS as a share_scope field filter instead).
+    where.push(`(m.owner_id IN (${ownerPlaceholders}) OR dm.uid IS NOT NULL)`)
+    args.push(...ownerSet)
+
+    const sql = `
+      SELECT m.doc_id
+      FROM doc_meta m
+      LEFT JOIN doc_member dm ON dm.doc_id = m.doc_id AND dm.uid = ?
+      WHERE ${where.join(' AND ')}
+    `
+    const rows = await query<{ doc_id: string }>(sql, args)
+    return rows.map((r) => r.doc_id)
+  },
+
   /** Bump permission_epoch within an existing transaction (§4.5). */
   async bumpEpochTx(tx: Tx, docId: string): Promise<void> {
     await tx.query('UPDATE doc_meta SET permission_epoch = permission_epoch + 1 WHERE doc_id = ?', [docId])

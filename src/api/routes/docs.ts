@@ -25,6 +25,7 @@ import { buildDocShareUrl } from '../../util/docShareLink.js'
 import { config } from '../../config/env.js'
 import { getOctoIdentity } from '../../auth/octoIdentity.js'
 import { requireDocRole } from '../guard.js'
+import { searchDocs } from '../../search/osClient.js'
 
 export const docsRouter: ExpressRouter = Router()
 
@@ -323,6 +324,88 @@ export async function listDocsHandler(req: Request, res: Response) {
 }
 
 docsRouter.get('/', listDocsHandler)
+
+/**
+ * POST /api/v1/docs/search — full-text search with permission down-push (P4).
+ *
+ * MySQL computes the visibility CONSTRAINT first (§5.3): the caller's small
+ * private/explicitly-granted doc_id set (owner OR doc_member) + an isSpaceMember
+ * boolean. Those are pushed DOWN into the OpenSearch query as a filter (§5.4):
+ * `doc_id IN <private set>` OR (members only) `share_scope=1`, alongside space +
+ * status. OS then does the FULL-TEXT match, highlight, AND pagination — every hit
+ * is already within the caller's access, so there is NO per-hit MySQL re-check
+ * (§6.4). anyone_in_space docs are never enumerated in MySQL (could be many); they
+ * are matched OS-side via the share_scope field branch.
+ *
+ * Registered BEFORE the '/:docId' routes so the '/search' literal is never
+ * shadowed by the single-doc param route.
+ *
+ *   body: { q: string, docType?: string[], page?: number, pageSize?: number }
+ *   400 q required         q empty/missing
+ *   503 search unavailable search disabled, OR OpenSearch errored (never fail-open)
+ */
+export async function searchDocsHandler(req: Request, res: Response) {
+  // Gray release gate: with search disabled the endpoint never connects to OS.
+  if (config.search.enabled === false) {
+    res.status(503).json({ error: 'search unavailable', reason: 'search_disabled' })
+    return
+  }
+  const uid = req.uid!
+  const spaceId = req.spaceId!
+  const { q, docType: docTypeRaw, page: pageRaw, pageSize: pageSizeRaw } = req.body ?? {}
+  if (typeof q !== 'string' || q.trim() === '') {
+    res.status(400).json({ error: 'q required' })
+    return
+  }
+  // Optional kind filter (§6.3): validated against the fixed doc_type enum;
+  // unknown/absent => no filter. Pushed to both the MySQL constraint and OS filter.
+  const docType = normalizeTypeFilter(docTypeRaw)
+  const page = Math.max(1, Number(pageRaw ?? 1) || 1)
+  const pageSize = Math.min(config.search.pageSizeMax, Math.max(1, Number(pageSizeRaw ?? 20) || 20))
+  const from = (page - 1) * pageSize
+  const ownedBots = req.ownedBots ?? []
+  // Space-share visibility must match the list side: only a confirmed member of
+  // the queried space sees its anyone_in_space docs (fail-closed on lookup error).
+  const isSpaceMember = await resolveViewerSpaceMembership(req)
+
+  // 1. MySQL: the caller's private/explicitly-granted visible doc_id set (small).
+  //    Space-share is NOT enumerated here — it is pushed to OS as share_scope=1.
+  const visibleDocIds = await docMetaRepo.listVisibleDocIdSet({ uid, spaceId, ownedBots, docType })
+
+  // 2. OS: full-text match with the visibility constraint pushed down as a filter,
+  //    paginated by OS. Empty private set AND non-member short-circuits to total=0
+  //    inside searchDocs (no OS call). OS error => 503, never fail-open.
+  let result
+  try {
+    result = await searchDocs({
+      spaceId,
+      query: q.trim(),
+      docType,
+      visibleDocIds,
+      isSpaceMember,
+      from,
+      size: pageSize,
+    })
+  } catch {
+    res.status(503).json({ error: 'search unavailable' })
+    return
+  }
+
+  // Hits are already within the visibility constraint and carry their own display
+  // metadata from OS _source — no MySQL round-trip, no role (§6.3 response).
+  res.status(200).json({
+    total: result.total,
+    items: result.items.map((it) => ({
+      docId: it.docId,
+      title: it.title,
+      docType: it.docType,
+      updatedAt: it.updatedAt,
+      ...(it.highlight ? { highlight: it.highlight } : {}),
+    })),
+  })
+}
+
+docsRouter.post('/search', searchDocsHandler)
 
 /**
  * POST /api/v1/docs/{docId}/view — record that the caller opened this doc

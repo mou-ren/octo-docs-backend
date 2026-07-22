@@ -28,6 +28,7 @@
     "@hocuspocus/extension-redis": "^4.3.0",
     "@hocuspocus/server": "^4.1.2",
     "@napi-rs/canvas": "^1.0.2",
+    "@opensearch-project/opensearch": "^3.6.0",
     "@tiptap/extension-emoji": "^3.22.2",
     "@types/jsdom": "^28.0.3",
     "docx": "^9.7.1",
