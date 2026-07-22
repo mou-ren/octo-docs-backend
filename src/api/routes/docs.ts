@@ -25,6 +25,7 @@ import { buildDocShareUrl } from '../../util/docShareLink.js'
 import { config } from '../../config/env.js'
 import { getOctoIdentity } from '../../auth/octoIdentity.js'
 import { requireDocRole } from '../guard.js'
+import { searchDocs } from '../../search/osClient.js'
 
 export const docsRouter: ExpressRouter = Router()
 
@@ -327,6 +328,87 @@ export async function listDocsHandler(req: Request, res: Response) {
 }
 
 docsRouter.get('/', listDocsHandler)
+
+/**
+ * POST /api/v1/docs/search — full-text search with permission down-push (P4).
+ *
+ * OpenSearch (the `octo-doc` index the independent indexer writes) holds no
+ * permission data: it returns candidate doc_ids in relevance order, scoped to the
+ * caller's space + active docs. The DB visibility model then intersects those
+ * candidates with what the caller may actually see (docMetaRepo.filterVisibleDocIds,
+ * the SAME predicate listForUser uses), so search access exactly matches
+ * list/browse access. Results keep OS relevance order; pagination is in-memory over
+ * the already-bounded candidate set (config.search.maxCandidates).
+ *
+ * Registered BEFORE the '/:docId' routes so the '/search' literal is never
+ * shadowed by the single-doc param route.
+ *
+ *   body: { q: string, page?: number, pageSize?: number }
+ *   400 q required         q empty/missing
+ *   503 search unavailable search disabled, OR OpenSearch errored (never fail-open)
+ */
+export async function searchDocsHandler(req: Request, res: Response) {
+  // Gray release gate: with search disabled the endpoint never connects to OS.
+  if (config.search.enabled === false) {
+    res.status(503).json({ error: 'search unavailable', reason: 'search_disabled' })
+    return
+  }
+  const uid = req.uid!
+  const spaceId = req.spaceId!
+  const { q, page: pageRaw, pageSize: pageSizeRaw } = req.body ?? {}
+  if (typeof q !== 'string' || q.trim() === '') {
+    res.status(400).json({ error: 'q required' })
+    return
+  }
+  const page = Math.max(1, Number(pageRaw ?? 1) || 1)
+  const pageSize = Math.min(config.search.pageSizeMax, Math.max(1, Number(pageSizeRaw ?? 20) || 20))
+  const ownedBots = req.ownedBots ?? []
+  // Space-share visibility must match the list side: only a confirmed member of
+  // the queried space sees its anyone_in_space docs (fail-closed on lookup error).
+  const isSpaceMember = await resolveViewerSpaceMembership(req)
+
+  // 1. OS candidates (relevance order, space+active scoped). OS error => 503,
+  //    never fail-open to returning everything.
+  let candidates
+  try {
+    candidates = await searchDocs({ spaceId, query: q.trim(), size: config.search.maxCandidates })
+  } catch {
+    res.status(503).json({ error: 'search unavailable' })
+    return
+  }
+
+  // 2. DB permission intersection: which candidates the caller may actually see,
+  //    with role/title/metadata. Empty candidate set short-circuits in the repo.
+  const visible = await docMetaRepo.filterVisibleDocIds({
+    uid,
+    spaceId,
+    isSpaceMember,
+    ownedBots,
+    docIds: candidates.map((c) => c.docId),
+  })
+
+  // 3. Keep OS relevance order, drop non-visible, then in-memory paginate.
+  const ordered = candidates.filter((c) => visible.has(c.docId))
+  const total = ordered.length
+  const start = (page - 1) * pageSize
+  const pageItems = ordered.slice(start, start + pageSize)
+  res.status(200).json({
+    total,
+    items: pageItems.map((c) => {
+      const meta = visible.get(c.docId)!
+      return {
+        docId: c.docId,
+        title: meta.title,
+        docType: meta.docType,
+        role: roleName(Number(meta.role)),
+        score: c.score,
+        ...(c.highlight ? { highlight: c.highlight } : {}),
+      }
+    }),
+  })
+}
+
+docsRouter.post('/search', searchDocsHandler)
 
 /**
  * POST /api/v1/docs/{docId}/view — record that the caller opened this doc

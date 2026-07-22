@@ -74,6 +74,48 @@ export interface CreateDocInput {
   createdBy: string
 }
 
+/**
+ * Build the shared NON-"owner=me" visibility predicate and its matching role
+ * projection, so the two read paths that intersect the caller's access —
+ * listForUser (list/browse) and filterVisibleDocIds (full-text search permission
+ * down-push) — derive an identical answer from ONE source instead of two drifting
+ * copies. Both returned SQL fragments carry exactly ONE `?` placeholder each — the
+ * caller uid for the `m.owner_id = ?` owner arm — so callers splice `params.uid`
+ * at the right bind position (roleExpr's placeholder sits in the SELECT list, the
+ * visibility placeholder in the WHERE).
+ *
+ * Kept in lockstep with the write side (effectiveRole / shareScope.ts):
+ *   - visibility: owner OR doc_member OR (when the caller is a CONFIRMED space
+ *     member) share_scope=anyone_in_space. A non-member collapses to owner OR
+ *     doc_member — no share arm — so a spoofed space header never opens the share
+ *     branch (the includeSpaceShare gate is decided by the caller).
+ *   - role: owner => admin(3); otherwise GREATEST(direct doc_member role,
+ *     share-derived role). When includeSpaceShare and the doc is anyone_in_space,
+ *     an EDIT share yields writer(2)/any other share reader(1); GREATEST keeps the
+ *     share path RAISE-only (a direct writer/admin is never lowered by a reader
+ *     share). SHARE_SCOPE_ANYONE / SHARE_ROLE_EDIT are numeric constants inlined
+ *     (no extra bind), so the single leading owner-uid bind is identical whether
+ *     or not the share arm is present.
+ */
+function buildVisibilityAndRole(includeSpaceShare: boolean): { visibility: string; roleExpr: string } {
+  if (includeSpaceShare) {
+    return {
+      visibility: `(m.owner_id = ? OR dm.uid IS NOT NULL OR m.share_scope = ${SHARE_SCOPE_ANYONE})`,
+      roleExpr: `CASE WHEN m.owner_id = ? THEN 3
+              ELSE GREATEST(
+                COALESCE(dm.role, 0),
+                CASE WHEN m.share_scope = ${SHARE_SCOPE_ANYONE}
+                     THEN (CASE WHEN m.share_role = ${SHARE_ROLE_EDIT} THEN 2 ELSE 1 END)
+                     ELSE 0 END
+              ) END`,
+    }
+  }
+  return {
+    visibility: '(m.owner_id = ? OR dm.uid IS NOT NULL)',
+    roleExpr: 'CASE WHEN m.owner_id = ? THEN 3 ELSE dm.role END',
+  }
+}
+
 export const docMetaRepo = {
   async create(input: CreateDocInput): Promise<void> {
     await query(
@@ -317,6 +359,10 @@ export const docMetaRepo = {
     let visibility: string
     // Bind values contributed by the visibility clause, in placeholder order.
     const visibilityArgs: unknown[] = []
+    // roleExpr for the non-me paths is built by buildVisibilityAndRole alongside
+    // the matching visibility predicate (single shared source, see below); the
+    // owner=me branch overrides it inline (all rows owned => role always 3).
+    let sharedRoleExpr = ''
     if (params.owner === 'me') {
       const ownerSet = [
         params.uid,
@@ -325,11 +371,12 @@ export const docMetaRepo = {
       // ownerSet always has >=1 element (params.uid); empty ownedBots => IN (?).
       visibility = `m.owner_id IN (${ownerSet.map(() => '?').join(', ')})`
       visibilityArgs.push(...ownerSet)
-    } else if (includeSpaceShare) {
-      visibility = `(m.owner_id = ? OR dm.uid IS NOT NULL OR m.share_scope = ${SHARE_SCOPE_ANYONE})`
-      visibilityArgs.push(params.uid)
     } else {
-      visibility = '(m.owner_id = ? OR dm.uid IS NOT NULL)'
+      // Non-me path: owner OR doc_member OR (member-gated) anyone_in_space share.
+      // Shared with filterVisibleDocIds so both derive an identical answer.
+      const built = buildVisibilityAndRole(includeSpaceShare)
+      visibility = built.visibility
+      sharedRoleExpr = built.roleExpr
       visibilityArgs.push(params.uid)
     }
     // Placeholders in `base`, in order: JOIN `dm.uid = ?`, then the optional
@@ -359,26 +406,11 @@ export const docMetaRepo = {
     const total = Number(countRows[0]?.cnt ?? 0)
 
     // tie-break on doc_id keeps offset paging stable when rows share updated_at.
-    // role projection MUST mirror the write side (effectiveRole, shareScope.ts):
-    // owner => admin(3); otherwise the MAX of the direct doc_member role and the
-    // share-derived role. When the caller is a confirmed Space member and the doc
-    // is anyone_in_space, an EDIT share yields writer(2) / any other share yields
-    // reader(1) — so a share-only doc (no doc_member row => dm.role NULL) is
-    // labeled writer, not silently reader (Number(null)=0). GREATEST(COALESCE...)
-    // keeps the share path RAISE-only: a direct writer/admin is never lowered by a
-    // reader share. The share arm is only present on the same includeSpaceShare
-    // gate as the visibility predicate, so a non-member never gets a share label.
-    // SHARE_SCOPE_ANYONE / SHARE_ROLE_EDIT are numeric constants inlined (no bind),
-    // so the leading owner-uid bind is identical whether or not the arm is present.
-    const roleExpr = includeSpaceShare
-      ? `CASE WHEN m.owner_id = ? THEN 3
-              ELSE GREATEST(
-                COALESCE(dm.role, 0),
-                CASE WHEN m.share_scope = ${SHARE_SCOPE_ANYONE}
-                     THEN (CASE WHEN m.share_role = ${SHARE_ROLE_EDIT} THEN 2 ELSE 1 END)
-                     ELSE 0 END
-              ) END`
-      : 'CASE WHEN m.owner_id = ? THEN 3 ELSE dm.role END'
+    // role projection MUST mirror the write side (effectiveRole, shareScope.ts).
+    // For the non-me paths it comes straight from buildVisibilityAndRole above
+    // (single shared source with filterVisibleDocIds); the owner=me path is always
+    // admin(3) since every row is owned by the caller/their bots.
+    const roleExpr = params.owner === 'me' ? 'CASE WHEN m.owner_id = ? THEN 3 ELSE dm.role END' : sharedRoleExpr
     const items = await query<DocMeta & { role: number }>(
       `SELECT m.*, ${roleExpr} AS role
        ${base}
@@ -387,6 +419,63 @@ export const docMetaRepo = {
       [params.uid, ...args],
     )
     return { total, items }
+  },
+
+  /**
+   * Permission down-push for full-text search (P4). Given a set of candidate
+   * doc_ids OpenSearch returned (relevance-ordered, holding no permission data),
+   * return ONLY the ones the caller may actually see in `spaceId`, each with its
+   * resolved role + display metadata. The visibility predicate + role projection
+   * are the SAME non-"owner=me" pair listForUser uses (buildVisibilityAndRole),
+   * so search access exactly matches list/browse access — no second permission
+   * model. status=1 (active only) is enforced in the WHERE, so an archived/deleted
+   * doc that OS still carries drops out here even if it matched.
+   *
+   * Returns a Map doc_id -> { role, title, docType, updatedAt } containing only
+   * visible docs; the route re-orders by the OS candidate order. An empty docIds
+   * set short-circuits to an empty Map (no query).
+   */
+  async filterVisibleDocIds(params: {
+    uid: string
+    spaceId: string
+    isSpaceMember: boolean
+    ownedBots?: string[]
+    docIds: string[]
+  }): Promise<Map<string, { role: number; title: string; docType: string; updatedAt: Date }>> {
+    const result = new Map<string, { role: number; title: string; docType: string; updatedAt: Date }>()
+    const docIds = (params.docIds ?? []).filter((d) => typeof d === 'string' && d !== '')
+    if (docIds.length === 0) return result
+
+    // Same member-gated share arm as listForUser's non-me path: only a CONFIRMED
+    // space member sees anyone_in_space docs. A non-member collapses to owner OR
+    // doc_member — no share branch — so a spoofed header never opens it.
+    const includeSpaceShare = params.isSpaceMember === true
+    const { visibility, roleExpr } = buildVisibilityAndRole(includeSpaceShare)
+
+    // Bind order MUST match placeholder order (mysql2 execute, errno 1210 on a
+    // mismatch): roleExpr's owner `?` sits first (SELECT list), then the JOIN
+    // `dm.uid = ?`, then space_id, then the IN (...) doc_ids, then visibility's
+    // owner `?` (WHERE tail). This mirrors listForUser's uid-leads/visibility-
+    // trails discipline; both buildVisibilityAndRole fragments carry exactly one
+    // owner-uid placeholder each.
+    const placeholders = docIds.map(() => '?').join(', ')
+    const sql = `
+      SELECT m.doc_id, m.title, m.doc_type, m.updated_at, ${roleExpr} AS role
+      FROM doc_meta m
+      LEFT JOIN doc_member dm ON dm.doc_id = m.doc_id AND dm.uid = ?
+      WHERE m.status = 1 AND m.space_id = ? AND m.doc_id IN (${placeholders}) AND ${visibility}
+    `
+    const args: unknown[] = [params.uid, params.uid, params.spaceId, ...docIds, params.uid]
+    const rows = await query<{ doc_id: string; title: string; doc_type: string; updated_at: Date; role: number }>(sql, args)
+    for (const r of rows) {
+      result.set(r.doc_id, {
+        role: Number(r.role),
+        title: r.title,
+        docType: r.doc_type,
+        updatedAt: r.updated_at,
+      })
+    }
+    return result
   },
 
   /** Bump permission_epoch within an existing transaction (§4.5). */
