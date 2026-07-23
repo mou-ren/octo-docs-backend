@@ -73,11 +73,6 @@ describe('enqueueDocIndex — producer', () => {
     expect(signal.ts).toBeGreaterThan(0)
   })
 
-  it('XADDs an acl signal for permission changes', async () => {
-    await enqueueDocIndex('octo:sp1:fol1:doc1', 'acl')
-    expect(decodeXadd(xaddCalls[0]!).signal.kind).toBe('acl')
-  })
-
   it('defaults kind to body', async () => {
     await enqueueDocIndex('octo:sp1:fol1:doc1')
     expect(decodeXadd(xaddCalls[0]!).signal.kind).toBe('body')

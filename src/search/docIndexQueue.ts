@@ -44,12 +44,13 @@ export function docIndexQueueKey(): string {
 }
 
 /**
- * Kind of change that triggered the signal:
- *  - 'body' — content changed; consumer re-reads the body and re-indexes it.
- *  - 'acl'  — permission changed (owner/member/share/status); consumer re-reads
- *    the ACL fields and partial-updates them WITHOUT touching the body.
+ * Kind of change that triggered the signal. Only 'body' is emitted now: content
+ * changed, so the consumer re-reads the body and re-indexes it. (Permission/status
+ * changes are NOT signalled — search visibility is computed live in MySQL at query
+ * time via listVisibleDocIdSet, so the index needs no ACL/status sync. The old
+ * 'acl' producer was removed.)
  */
-export type DocIndexKind = 'body' | 'acl'
+export type DocIndexKind = 'body'
 
 /**
  * Whether a documentName has a searchable body worth enqueuing. Indexed this期:
