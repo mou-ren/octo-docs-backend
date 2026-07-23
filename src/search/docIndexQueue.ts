@@ -13,9 +13,11 @@
  * Transport: a Redis STREAM over the shared ioredis client (XADD here; the
  * indexer XREADGROUPs via a consumer group with PEL/XACK/XCLAIM/DLQ for
  * at-least-once delivery). The stream key MUST byte-match the indexer's
- * STREAM_KEY (config.search.indexStreamKey, default 'doc-index', written
- * UNPREFIXED). The consumer / indexer / OpenSearch wiring is intentionally out
- * of scope for this module.
+ * STREAM_KEY (config.search.indexStreamKey, default `${REDIS_PREFIX}:doc-index`,
+ * e.g. 'octo-docs-test:doc-index'). The payload is a single JSON field
+ * `payload` holding {documentName,kind,ts}; the indexer JSON.parses it. The
+ * consumer / indexer / OpenSearch wiring is intentionally out of scope for this
+ * module.
  *
  * Bounded: because the stream lives on the SHARED Redis (also backing epoch
  * cache, pub/sub and the connection registry), an absent/lagging consumer must
@@ -33,8 +35,9 @@ import { parseDocumentName } from '../permission/documentName.js'
 import { config } from '../config/env.js'
 
 /**
- * Redis STREAM key holding pending index signals. Written UNPREFIXED so it
- * byte-matches the indexer's STREAM_KEY (the indexer applies no rkey namespace).
+ * Redis STREAM key holding pending index signals. Namespaced via REDIS_PREFIX
+ * (config.search.indexStreamKey) to match every other doc-backend key on the
+ * shared Redis; the indexer's STREAM_KEY env MUST be set to the same value.
  */
 export function docIndexQueueKey(): string {
   return config.search.indexStreamKey
@@ -64,10 +67,9 @@ export function isSearchIndexedDoc(documentName: string): boolean {
 }
 
 /**
- * Shape of one index signal. NOTE: this is written to the stream as flat Redis
- * field/value pairs (documentName, kind, ts) by enqueueDocIndex, NOT as a JSON
- * blob — the indexer's parseMessage reads those exact field names. This interface
- * documents that contract.
+ * Shape of one index signal, serialized as JSON into the stream's `payload`
+ * field by enqueueDocIndex. The indexer reads obj.payload and JSON.parses it
+ * back into this shape.
  */
 export interface DocIndexSignal {
   /** Canonical collab key `octo:<space>:<folder>:<doc>`; consumer parses/reads by it. */
@@ -92,27 +94,23 @@ export async function enqueueDocIndex(
   documentName: string,
   kind: DocIndexKind = 'body',
 ): Promise<boolean> {
-  const ts = Date.now()
+  const signal: DocIndexSignal = { documentName, kind, ts: Date.now() }
   try {
     const key = docIndexQueueKey()
     // XADD with an approximate MAXLEN trim (~) so the shared Redis can drop whole
     // macro-nodes cheaply and the stream can't grow unbounded when no consumer is
-    // draining. Fields are written as the flat name/value pairs the indexer's
-    // parseMessage expects: documentName, kind, ts. ts is DIAGNOSTIC ONLY (see
-    // DocIndexSignal) — the indexer derives its OpenSearch version from the DB,
-    // never from ts.
+    // draining. The whole signal is JSON-serialized into a single `payload`
+    // field; the indexer reads obj.payload and JSON.parses it. ts is DIAGNOSTIC
+    // ONLY (see DocIndexSignal) — the indexer derives its OpenSearch version from
+    // the DB, never from ts.
     await getRedis().xadd(
       key,
       'MAXLEN',
       '~',
       config.search.queueMax,
       '*',
-      'documentName',
-      documentName,
-      'kind',
-      kind,
-      'ts',
-      String(ts),
+      'payload',
+      JSON.stringify(signal),
     )
     return true
   } catch (err) {

@@ -171,6 +171,10 @@ export function resolveCardDisplayTimeZone(raw: string): string {
   return value
 }
 
+// REDIS_PREFIX is read once here so both redis.prefix and the search index
+// stream key can share it (a plain object literal can't self-reference).
+const redisPrefix = str('REDIS_PREFIX', 'octo-docs')
+
 export const config = {
   hostname: str('HOSTNAME', 'octo-docs-local'),
   hocuspocusPort: num('HOCUSPOCUS_PORT', 1234),
@@ -193,7 +197,7 @@ export const config = {
   redis: {
     host: str('REDIS_HOST', '127.0.0.1'),
     port: num('REDIS_PORT', 6379),
-    prefix: str('REDIS_PREFIX', 'octo-docs'),
+    prefix: redisPrefix,
   },
 
   // Full-text search (P4). OpenSearch holds the doc/sheet/board body index
@@ -225,10 +229,13 @@ export const config = {
     // exists.
     indexEnabled: bool('SEARCH_INDEX_ENABLED', false),
     // Redis Stream key the producer XADDs to and the indexer XREADGROUPs from.
-    // MUST byte-match the indexer's STREAM_KEY (its default is 'doc-index'); it
-    // is written UNPREFIXED (no rkey namespace) so both sides agree on the exact
-    // key. Change only in lockstep with the indexer.
-    indexStreamKey: str('SEARCH_INDEX_STREAM_KEY', 'doc-index'),
+    // MUST byte-match the indexer's STREAM_KEY. Default follows the shared
+    // REDIS_PREFIX namespace (e.g. 'octo-docs-test:doc-index' in test) so it
+    // stays consistent with every other doc-backend key on the shared Redis.
+    // LOCKSTEP: the indexer's STREAM_KEY env MUST be set to this same value
+    // (the indexer's own default is the unprefixed 'doc-index'). Change only in
+    // lockstep with the indexer deployment.
+    indexStreamKey: str('SEARCH_INDEX_STREAM_KEY', `${redisPrefix}:doc-index`),
     // Safety cap on the shared-Redis stream: each XADD trims with MAXLEN ~ to
     // roughly this many newest entries so an absent/lagging consumer can't grow
     // it without bound and OOM the shared instance (approximate/'~' trim lets

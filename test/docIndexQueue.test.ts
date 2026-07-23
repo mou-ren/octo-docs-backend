@@ -26,17 +26,15 @@ import {
 } from '../src/search/docIndexQueue.js'
 import { config } from '../src/config/env.js'
 
-// Decode an xadd(key, 'MAXLEN','~',max,'*', f1,v1, f2,v2, ...) call into
-// { key, maxlen, fields } for assertions.
+// Decode an xadd(key, 'MAXLEN','~',max,'*', 'payload', json) call into
+// { key, maxlen, signal } for assertions.
 function decodeXadd(call: XaddCall) {
   const key = call[0] as string
-  // call[1]='MAXLEN', call[2]='~', call[3]=max, call[4]='*', then field/value pairs
   const maxlen = call[3]
-  const fields: Record<string, string> = {}
-  for (let i = 5; i + 1 < call.length; i += 2) {
-    fields[call[i] as string] = call[i + 1] as string
-  }
-  return { key, maxlen, star: call[4], fields }
+  // call[4]='*', call[5]='payload', call[6]=json
+  const payloadField = call[5] as string
+  const signal = JSON.parse(call[6] as string)
+  return { key, maxlen, star: call[4], payloadField, signal }
 }
 
 beforeEach(() => {
@@ -61,32 +59,34 @@ describe('isSearchIndexedDoc — which docs get enqueued', () => {
 })
 
 describe('enqueueDocIndex — producer', () => {
-  it('XADDs a body signal with the flat {documentName, kind, ts} fields', async () => {
+  it('XADDs a body signal as a JSON payload field with {documentName, kind, ts}', async () => {
     const ok = await enqueueDocIndex('octo:sp1:fol1:doc1', 'body')
     expect(ok).toBe(true)
     expect(xaddCalls).toHaveLength(1)
-    const { key, star, fields } = decodeXadd(xaddCalls[0]!)
+    const { key, star, payloadField, signal } = decodeXadd(xaddCalls[0]!)
     expect(key).toBe(docIndexQueueKey())
     expect(star).toBe('*') // server-assigned id
-    expect(fields.documentName).toBe('octo:sp1:fol1:doc1')
-    expect(fields.kind).toBe('body')
-    expect(Number(fields.ts)).toBeGreaterThan(0)
+    expect(payloadField).toBe('payload')
+    expect(signal.documentName).toBe('octo:sp1:fol1:doc1')
+    expect(signal.kind).toBe('body')
+    expect(typeof signal.ts).toBe('number')
+    expect(signal.ts).toBeGreaterThan(0)
   })
 
   it('XADDs an acl signal for permission changes', async () => {
     await enqueueDocIndex('octo:sp1:fol1:doc1', 'acl')
-    expect(decodeXadd(xaddCalls[0]!).fields.kind).toBe('acl')
+    expect(decodeXadd(xaddCalls[0]!).signal.kind).toBe('acl')
   })
 
   it('defaults kind to body', async () => {
     await enqueueDocIndex('octo:sp1:fol1:doc1')
-    expect(decodeXadd(xaddCalls[0]!).fields.kind).toBe('body')
+    expect(decodeXadd(xaddCalls[0]!).signal.kind).toBe('body')
   })
 
-  it('writes the UNPREFIXED stream key that byte-matches the indexer STREAM_KEY', () => {
-    // Must equal the indexer default ('doc-index'), NOT an rkey-namespaced key.
+  it('writes the REDIS_PREFIX-namespaced stream key (must match indexer STREAM_KEY)', () => {
     expect(docIndexQueueKey()).toBe(config.search.indexStreamKey)
-    expect(docIndexQueueKey()).toBe('doc-index')
+    // Namespaced under the shared prefix, not a bare 'doc-index'.
+    expect(docIndexQueueKey()).toBe(`${config.redis.prefix}:doc-index`)
   })
 
   it('trims with MAXLEN ~ queueMax on every XADD to bound shared-Redis growth', async () => {
