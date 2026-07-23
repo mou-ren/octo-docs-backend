@@ -218,15 +218,22 @@ export const config = {
     maxCandidates: num('SEARCH_MAX_CANDIDATES', 200),
     // Upper bound a caller's pageSize is clamped to.
     pageSizeMax: num('SEARCH_PAGE_SIZE_MAX', 50),
-    // --- Producer side (#115): the afterStoreDocument / html-create / acl hooks
-    // enqueue a tiny {documentName} signal onto a Redis list for a separate
-    // indexer to consume. Default OFF (gray release): while disabled the hooks
-    // are inert, so the queue never grows before a consumer exists.
+    // --- Producer side: the afterStoreDocument / html-create / acl hooks XADD a
+    // tiny {documentName,kind,ts} signal onto a Redis STREAM for a separate
+    // indexer (consumer group) to consume. Default OFF (gray release): while
+    // disabled the hooks are inert, so the stream never grows before a consumer
+    // exists.
     indexEnabled: bool('SEARCH_INDEX_ENABLED', false),
-    // Safety cap on the shared-Redis index LIST: each push LTRIMs to this many
-    // newest entries so an absent/lagging consumer can't grow it without bound
-    // and OOM the shared instance. Under sustained overflow the oldest signals
-    // are dropped (best-effort). Rollout: deploy the consumer before enabling.
+    // Redis Stream key the producer XADDs to and the indexer XREADGROUPs from.
+    // MUST byte-match the indexer's STREAM_KEY (its default is 'doc-index'); it
+    // is written UNPREFIXED (no rkey namespace) so both sides agree on the exact
+    // key. Change only in lockstep with the indexer.
+    indexStreamKey: str('SEARCH_INDEX_STREAM_KEY', 'doc-index'),
+    // Safety cap on the shared-Redis stream: each XADD trims with MAXLEN ~ to
+    // roughly this many newest entries so an absent/lagging consumer can't grow
+    // it without bound and OOM the shared instance (approximate/'~' trim lets
+    // Redis drop whole macro-nodes cheaply). Rollout: deploy the consumer before
+    // enabling.
     queueMax: posIntMin('SEARCH_INDEX_QUEUE_MAX', 100_000, 1),
   },
 

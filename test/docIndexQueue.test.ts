@@ -1,46 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-// Fake Redis whose multi()/lpush/ltrim/exec mutate an in-memory list, so we can
-// assert both the enqueued payload and the LTRIM bound without a live Redis.
-// Mirrors the offline mock style in epoch.test.ts.
-const lists = new Map<string, string[]>()
-const execOps: Array<Array<[string, unknown[]]>> = []
-let failExec = false
-
-function makeMulti() {
-  const ops: Array<[string, unknown[]]> = []
-  const chain = {
-    lpush(...args: unknown[]) {
-      ops.push(['lpush', args])
-      return chain
-    },
-    ltrim(...args: unknown[]) {
-      ops.push(['ltrim', args])
-      return chain
-    },
-    async exec() {
-      if (failExec) throw new Error('redis down')
-      for (const [op, args] of ops) {
-        if (op === 'lpush') {
-          const [k, v] = args as [string, string]
-          const a = lists.get(k) ?? []
-          a.unshift(v) // LPUSH: newest at head
-          lists.set(k, a)
-        } else if (op === 'ltrim') {
-          const [k, start, stop] = args as [string, number, number]
-          const a = lists.get(k) ?? []
-          lists.set(k, a.slice(start, stop + 1))
-        }
-      }
-      execOps.push(ops)
-      return []
-    },
-  }
-  return chain
-}
+// Fake Redis whose xadd records the call args (key + flat field/value pairs) into
+// an in-memory log, so we can assert the stream key, payload fields and the
+// MAXLEN trim without a live Redis. Mirrors the offline mock style in
+// epoch.test.ts.
+type XaddCall = unknown[]
+const xaddCalls: XaddCall[] = []
+let failXadd = false
 
 vi.mock('../src/db/redis.js', () => ({
-  getRedis: () => ({ multi: makeMulti }),
+  getRedis: () => ({
+    async xadd(...args: unknown[]) {
+      if (failXadd) throw new Error('redis down')
+      xaddCalls.push(args)
+      return '1-0'
+    },
+  }),
   rkey: (...parts: string[]) => ['octo-docs', ...parts].join(':'),
 }))
 
@@ -48,14 +23,25 @@ import {
   enqueueDocIndex,
   isSearchIndexedDoc,
   docIndexQueueKey,
-  type DocIndexSignal,
 } from '../src/search/docIndexQueue.js'
 import { config } from '../src/config/env.js'
 
+// Decode an xadd(key, 'MAXLEN','~',max,'*', f1,v1, f2,v2, ...) call into
+// { key, maxlen, fields } for assertions.
+function decodeXadd(call: XaddCall) {
+  const key = call[0] as string
+  // call[1]='MAXLEN', call[2]='~', call[3]=max, call[4]='*', then field/value pairs
+  const maxlen = call[3]
+  const fields: Record<string, string> = {}
+  for (let i = 5; i + 1 < call.length; i += 2) {
+    fields[call[i] as string] = call[i + 1] as string
+  }
+  return { key, maxlen, star: call[4], fields }
+}
+
 beforeEach(() => {
-  lists.clear()
-  execOps.length = 0
-  failExec = false
+  xaddCalls.length = 0
+  failXadd = false
 })
 
 describe('isSearchIndexedDoc — which docs get enqueued', () => {
@@ -75,46 +61,45 @@ describe('isSearchIndexedDoc — which docs get enqueued', () => {
 })
 
 describe('enqueueDocIndex — producer', () => {
-  it('pushes a body signal with the {documentName, kind, ts} payload', async () => {
+  it('XADDs a body signal with the flat {documentName, kind, ts} fields', async () => {
     const ok = await enqueueDocIndex('octo:sp1:fol1:doc1', 'body')
     expect(ok).toBe(true)
-    const raw = lists.get(docIndexQueueKey())
-    expect(raw).toHaveLength(1)
-    const signal = JSON.parse(raw![0]) as DocIndexSignal
-    expect(signal.documentName).toBe('octo:sp1:fol1:doc1')
-    expect(signal.kind).toBe('body')
-    expect(typeof signal.ts).toBe('number')
-    expect(signal.ts).toBeGreaterThan(0)
+    expect(xaddCalls).toHaveLength(1)
+    const { key, star, fields } = decodeXadd(xaddCalls[0]!)
+    expect(key).toBe(docIndexQueueKey())
+    expect(star).toBe('*') // server-assigned id
+    expect(fields.documentName).toBe('octo:sp1:fol1:doc1')
+    expect(fields.kind).toBe('body')
+    expect(Number(fields.ts)).toBeGreaterThan(0)
   })
 
-  it('pushes an acl signal for permission changes', async () => {
+  it('XADDs an acl signal for permission changes', async () => {
     await enqueueDocIndex('octo:sp1:fol1:doc1', 'acl')
-    const signal = JSON.parse(lists.get(docIndexQueueKey())![0]) as DocIndexSignal
-    expect(signal.kind).toBe('acl')
+    expect(decodeXadd(xaddCalls[0]!).fields.kind).toBe('acl')
   })
 
   it('defaults kind to body', async () => {
     await enqueueDocIndex('octo:sp1:fol1:doc1')
-    const signal = JSON.parse(lists.get(docIndexQueueKey())![0]) as DocIndexSignal
-    expect(signal.kind).toBe('body')
+    expect(decodeXadd(xaddCalls[0]!).fields.kind).toBe('body')
   })
 
-  it('uses the namespaced queue key', () => {
-    expect(docIndexQueueKey()).toBe('octo-docs:search:body-queue')
+  it('writes the UNPREFIXED stream key that byte-matches the indexer STREAM_KEY', () => {
+    // Must equal the indexer default ('doc-index'), NOT an rkey-namespaced key.
+    expect(docIndexQueueKey()).toBe(config.search.indexStreamKey)
+    expect(docIndexQueueKey()).toBe('doc-index')
   })
 
-  it('LTRIMs to queueMax on every push to bound shared-Redis growth', async () => {
+  it('trims with MAXLEN ~ queueMax on every XADD to bound shared-Redis growth', async () => {
     await enqueueDocIndex('octo:sp1:fol1:doc1', 'body')
-    const key = docIndexQueueKey()
-    const lastOps = execOps.at(-1)!
-    const ltrim = lastOps.find(([op]) => op === 'ltrim')
-    expect(ltrim).toBeDefined()
-    expect(ltrim![1]).toEqual([key, 0, config.search.queueMax - 1])
+    const call = xaddCalls[0]!
+    expect(call[1]).toBe('MAXLEN')
+    expect(call[2]).toBe('~')
+    expect(call[3]).toBe(config.search.queueMax)
   })
 
   it('swallows a Redis failure, returns false, and never throws', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    failExec = true
+    failXadd = true
     const ok = await enqueueDocIndex('octo:sp1:fol1:doc1', 'body')
     expect(ok).toBe(false)
     expect(warn).toHaveBeenCalledOnce()

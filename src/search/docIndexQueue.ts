@@ -4,35 +4,40 @@
  * When a document's authoritative state is persisted (collab afterStoreDocument,
  * §3.3a of the search design), we enqueue a tiny "this doc changed" signal so a
  * separate indexer can later re-read the latest body and upsert it into
- * OpenSearch. The queue deliberately carries ONLY the documentName (no body,
+ * OpenSearch. The signal deliberately carries ONLY the documentName (no body,
  * no ACL) — the consumer re-reads authoritative data by key, which keeps the
- * message small. Coalescing is a CONSUMER behavior (pop the latest signal for a
- * doc, read once): the LIST itself does not dedupe, so a burst of edits appends
- * one entry each.
+ * message small. Coalescing is a CONSUMER behavior (collapse repeated signals
+ * for a doc, read once): the stream itself does not dedupe, so a burst of edits
+ * appends one entry each.
  *
- * Transport: a plain Redis LIST over the shared ioredis client (LPUSH here at the
- * head; the consumer BRPOPs from the tail => FIFO). No new infrastructure, no
- * BullMQ. The consumer / indexer / OpenSearch wiring is intentionally out of
- * scope for this module.
+ * Transport: a Redis STREAM over the shared ioredis client (XADD here; the
+ * indexer XREADGROUPs via a consumer group with PEL/XACK/XCLAIM/DLQ for
+ * at-least-once delivery). The stream key MUST byte-match the indexer's
+ * STREAM_KEY (config.search.indexStreamKey, default 'doc-index', written
+ * UNPREFIXED). The consumer / indexer / OpenSearch wiring is intentionally out
+ * of scope for this module.
  *
- * Bounded: because the LIST lives on the SHARED Redis (also backing epoch cache,
- * pub/sub and the connection registry), an absent/lagging consumer must not grow
- * it without limit and OOM the shared instance. Each push therefore LTRIMs to the
- * newest `config.search.queueMax` entries. This is a safety valve, not a
- * guarantee: under sustained overflow the OLDEST signals are dropped. Rollout
+ * Bounded: because the stream lives on the SHARED Redis (also backing epoch
+ * cache, pub/sub and the connection registry), an absent/lagging consumer must
+ * not grow it without limit and OOM the shared instance. Each XADD therefore
+ * trims with MAXLEN ~ config.search.queueMax. This is a safety valve, not a
+ * guarantee: under sustained overflow the OLDEST entries are dropped. Rollout
  * contract: deploy the consumer BEFORE flipping SEARCH_INDEX_ENABLED on.
  *
- * This is a best-effort side channel: a push failure must NEVER disturb the
+ * This is a best-effort side channel: an XADD failure must NEVER disturb the
  * collab store path, so callers fire-and-forget and every error is swallowed
  * after logging.
  */
-import { getRedis, rkey } from '../db/redis.js'
+import { getRedis } from '../db/redis.js'
 import { parseDocumentName } from '../permission/documentName.js'
 import { config } from '../config/env.js'
 
-/** Redis LIST key holding pending index signals. Consumer BRPOPs the tail. */
+/**
+ * Redis STREAM key holding pending index signals. Written UNPREFIXED so it
+ * byte-matches the indexer's STREAM_KEY (the indexer applies no rkey namespace).
+ */
 export function docIndexQueueKey(): string {
-  return rkey('search', 'body-queue')
+  return config.search.indexStreamKey
 }
 
 /**
@@ -58,6 +63,12 @@ export function isSearchIndexedDoc(documentName: string): boolean {
   }
 }
 
+/**
+ * Shape of one index signal. NOTE: this is written to the stream as flat Redis
+ * field/value pairs (documentName, kind, ts) by enqueueDocIndex, NOT as a JSON
+ * blob — the indexer's parseMessage reads those exact field names. This interface
+ * documents that contract.
+ */
 export interface DocIndexSignal {
   /** Canonical collab key `octo:<space>:<folder>:<doc>`; consumer parses/reads by it. */
   documentName: string
@@ -73,25 +84,36 @@ export interface DocIndexSignal {
 }
 
 /**
- * Push a change signal onto the index queue. Best-effort: never throws — a Redis
- * hiccup here must not fail the surrounding store. Returns true if the push was
- * accepted by Redis, false if it was swallowed.
+ * Push a change signal onto the index stream. Best-effort: never throws — a
+ * Redis hiccup here must not fail the surrounding store. Returns true if the
+ * XADD was accepted by Redis, false if it was swallowed.
  */
 export async function enqueueDocIndex(
   documentName: string,
   kind: DocIndexKind = 'body',
 ): Promise<boolean> {
-  const signal: DocIndexSignal = { documentName, kind, ts: Date.now() }
+  const ts = Date.now()
   try {
     const key = docIndexQueueKey()
-    // LPUSH then LTRIM to the newest queueMax in one round-trip: the LTRIM caps
-    // growth on the shared Redis when no consumer is draining (0 .. max-1 keeps
-    // the head, dropping the oldest tail entries under overflow).
-    await getRedis()
-      .multi()
-      .lpush(key, JSON.stringify(signal))
-      .ltrim(key, 0, config.search.queueMax - 1)
-      .exec()
+    // XADD with an approximate MAXLEN trim (~) so the shared Redis can drop whole
+    // macro-nodes cheaply and the stream can't grow unbounded when no consumer is
+    // draining. Fields are written as the flat name/value pairs the indexer's
+    // parseMessage expects: documentName, kind, ts. ts is DIAGNOSTIC ONLY (see
+    // DocIndexSignal) — the indexer derives its OpenSearch version from the DB,
+    // never from ts.
+    await getRedis().xadd(
+      key,
+      'MAXLEN',
+      '~',
+      config.search.queueMax,
+      '*',
+      'documentName',
+      documentName,
+      'kind',
+      kind,
+      'ts',
+      String(ts),
+    )
     return true
   } catch (err) {
     // documentName is externally controlled (derived from client-supplied doc
