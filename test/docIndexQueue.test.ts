@@ -46,8 +46,8 @@ describe('isSearchIndexedDoc — which docs get enqueued', () => {
   it('accepts document (doc/sheet, 4-seg) keys', () => {
     expect(isSearchIndexedDoc('octo:sp1:fol1:doc1')).toBe(true)
   })
-  it('accepts html (5-seg) keys', () => {
-    expect(isSearchIndexedDoc('octo:sp1:fol1:html:doc2')).toBe(true)
+  it('rejects html (5-seg) keys — html excluded at the producer this期', () => {
+    expect(isSearchIndexedDoc('octo:sp1:fol1:html:doc2')).toBe(false)
   })
   it('rejects whiteboards (no searchable body)', () => {
     expect(isSearchIndexedDoc('octo:sp1:fol1:wb:board1')).toBe(false)

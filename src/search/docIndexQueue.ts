@@ -52,15 +52,15 @@ export function docIndexQueueKey(): string {
 export type DocIndexKind = 'body' | 'acl'
 
 /**
- * Whether a documentName has a row in the search index (so an event about it is
- * worth enqueuing). 'document' (doc / sheet) and 'html' are indexed; whiteboards
- * carry no searchable text and are never indexed, so ACL/body events for them
- * are dropped. Parse failures => not indexed (best-effort gate, never throws).
+ * Whether a documentName has a searchable body worth enqueuing. Only 'document'
+ * (doc / sheet) is indexed this期. Whiteboards (board) and html are EXCLUDED at
+ * the producer so their body/acl events are never enqueued — the consumer would
+ * skip html anyway, and board indexing is out of scope. Parse failures => not
+ * indexed (best-effort gate, never throws).
  */
 export function isSearchIndexedDoc(documentName: string): boolean {
   try {
-    const kind = parseDocumentName(documentName).kind
-    return kind === 'document' || kind === 'html'
+    return parseDocumentName(documentName).kind === 'document'
   } catch {
     return false
   }

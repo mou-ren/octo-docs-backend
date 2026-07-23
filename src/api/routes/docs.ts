@@ -22,7 +22,6 @@ import {
 import { buildWhiteboardName, WhiteboardNameError } from '../../whiteboard/schema/index.js'
 import { newDocId } from '../../util/ids.js'
 import { buildDocShareUrl } from '../../util/docShareLink.js'
-import { enqueueDocIndex } from '../../search/docIndexQueue.js'
 import { config } from '../../config/env.js'
 import { getOctoIdentity } from '../../auth/octoIdentity.js'
 import { requireDocRole } from '../guard.js'
@@ -236,10 +235,9 @@ export async function createDocHandler(req: Request, res: Response) {
   // Best-effort, fire-and-forget, gated OFF by default — must never affect the
   // create response. (A redundant acl on a fresh create is harmless under the
   // consumer's "re-read latest" model.)
-  if (resolvedDocType === HTML_DOC_TYPE && config.search.indexEnabled && meta?.document_name) {
-    void enqueueDocIndex(meta.document_name, 'body')
-    void enqueueDocIndex(meta.document_name, 'acl')
-  }
+  // NOTE: html docs are intentionally NOT fed to the search index this期 (board
+  // + html are excluded at the producer; isSearchIndexedDoc only accepts
+  // 'document'). The consumer skips html anyway, so no enqueue happens here.
   const responseDocId = resolvedDocType === HTML_DOC_TYPE ? (meta?.doc_id ?? docId) : docId
   const responseDocumentName = resolvedDocType === HTML_DOC_TYPE ? (meta?.document_name ?? documentName) : documentName
   const responseSpaceId = resolvedDocType === HTML_DOC_TYPE ? (meta?.space_id ?? spaceId) : spaceId
