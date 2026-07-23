@@ -67,15 +67,19 @@ interface OsSearchBody {
  *
  *   filter:
  *     - term space_id = spaceId
- *     - term status = 1 (archived/deleted docs the indexer may still carry excluded)
+ *     - term status = 1 (defense-in-depth; visibleDocIds is already status-gated
+ *       in MySQL, so this only guards against a stale index entry)
  *     - optional terms doc_type (kind filter)
- *     - bool.should [ terms doc_id IN <private set>, term share_scope=1 (members only) ]
- *       with minimum_should_match=1 — a hit must be in the private set OR (for a
- *       confirmed member) an anyone_in_space doc.
+ *     - terms doc_id IN <visibleDocIds> — the caller's complete visible set
+ *       (private + explicitly-granted + space-share), computed live in MySQL.
  *   query: multi_match over title^2 + body (ik-analyzed) + highlight on body.
  *
- * SHORT-CIRCUIT: with an empty private set AND a non-member, the should has no real
- * branch → nothing is visible → returns { total: 0, items: [] } WITHOUT hitting OS.
+ * Visibility is decided ENTIRELY by the MySQL-computed visibleDocIds; OS no longer
+ * carries a share_scope/status truth for permission decisions (that removes the
+ * stale-index hazard where a soft-deleted anyone_in_space doc could still match).
+ *
+ * SHORT-CIRCUIT: an empty visibleDocIds means nothing is visible → returns
+ * { total: 0, items: [] } WITHOUT hitting OS.
  *
  * total is read from hits.total.value (track_total_hits=true so it is exact, not
  * capped at 10k). _source carries title/doc_type/updated_at, so no MySQL round-trip.
@@ -88,29 +92,23 @@ export async function searchDocs(params: {
   query: string
   docType?: string[]
   visibleDocIds: string[]
-  isSpaceMember: boolean
   from: number
   size: number
 }): Promise<{ total: number; items: SearchItem[] }> {
   const visibleDocIds = (params.visibleDocIds ?? []).filter((d) => typeof d === 'string' && d !== '')
   const docTypes = (params.docType ?? []).filter((t) => typeof t === 'string' && t !== '')
 
-  // Build the should branches for the visibility constraint (§5.4). A member with
-  // no private docs still sees space-share; a non-member with no private docs sees
-  // nothing.
-  const should: Array<Record<string, unknown>> = []
-  if (visibleDocIds.length > 0) should.push({ terms: { doc_id: visibleDocIds } })
-  if (params.isSpaceMember) should.push({ term: { share_scope: 1 } })
-
-  // No real should branch => nothing visible => skip OS entirely (§6.4).
-  if (should.length === 0) return { total: 0, items: [] }
+  // Visibility = the MySQL-computed visible set only. Empty => nothing visible =>
+  // skip OS entirely (§6.4). No share_scope branch: space-share is already folded
+  // into visibleDocIds by listVisibleDocIdSet, so OS holds no permission truth.
+  if (visibleDocIds.length === 0) return { total: 0, items: [] }
 
   const filter: Array<Record<string, unknown>> = [
     { term: { space_id: params.spaceId } },
     { term: { status: 1 } },
   ]
   if (docTypes.length > 0) filter.push({ terms: { doc_type: docTypes } })
-  filter.push({ bool: { should, minimum_should_match: 1 } })
+  filter.push({ terms: { doc_id: visibleDocIds } })
 
   const os = getOsClient()
   const res = await os.search({

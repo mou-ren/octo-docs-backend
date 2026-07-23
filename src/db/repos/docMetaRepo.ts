@@ -410,6 +410,7 @@ export const docMetaRepo = {
     spaceId: string
     ownedBots?: string[]
     docType?: string[]
+    isSpaceMember?: boolean
   }): Promise<string[]> {
     // owner set: caller + any bot they own, de-duped, empties stripped — same
     // scope as listForUser owner='me', so bot-created private docs are visible.
@@ -430,9 +431,16 @@ export const docMetaRepo = {
       where.push(`m.doc_type IN (${docTypes.map(() => '?').join(', ')})`)
       args.push(...docTypes)
     }
-    // Private / explicitly-granted only: owner OR direct doc_member. NO share_scope
-    // branch (space-share is pushed to OS as a share_scope field filter instead).
-    where.push(`(m.owner_id IN (${ownerPlaceholders}) OR dm.uid IS NOT NULL)`)
+    // Visibility: owner OR direct doc_member, PLUS space-share (share_scope=anyone)
+    // for a confirmed space member — the SAME predicate as listForUser's
+    // includeSpaceShare branch (#64), gated on isSpaceMember (fail-closed: a
+    // non-member collapses to owner OR doc_member). Enumerating space-share here
+    // (with the status=1 filter above) means the search endpoint no longer needs
+    // OS to carry a fresh share_scope/status — an already-soft-deleted doc simply
+    // isn't in this set, so it can't be searched even if OS still holds a stale
+    // copy. SHARE_SCOPE_ANYONE is a numeric constant, inlined (no extra bind).
+    const spaceShare = params.isSpaceMember === true ? ` OR m.share_scope = ${SHARE_SCOPE_ANYONE}` : ''
+    where.push(`(m.owner_id IN (${ownerPlaceholders}) OR dm.uid IS NOT NULL${spaceShare})`)
     args.push(...ownerSet)
 
     const sql = `

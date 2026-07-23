@@ -349,11 +349,11 @@ docsRouter.get('/', listDocsHandler)
 /**
  * POST /api/v1/docs/search — full-text search with permission down-push (P4).
  *
- * MySQL computes the visibility CONSTRAINT first (§5.3): the caller's small
- * private/explicitly-granted doc_id set (owner OR doc_member) + an isSpaceMember
- * boolean. Those are pushed DOWN into the OpenSearch query as a filter (§5.4):
- * `doc_id IN <private set>` OR (members only) `share_scope=1`, alongside space +
- * status. OS then does the FULL-TEXT match, highlight, AND pagination — every hit
+ * MySQL computes the FULL visible set first (§5.3): the caller's visible doc_id
+ * set — owner OR doc_member OR (for a confirmed space member) share_scope=anyone,
+ * all gated by status=1. That set is pushed DOWN into the OpenSearch query as a
+ * `doc_id IN <set>` filter (§5.4), alongside space + status. OS then does the
+ * FULL-TEXT match, highlight, AND pagination — every hit
  * is already within the caller's access, so there is NO per-hit MySQL re-check
  * (§6.4). anyone_in_space docs are never enumerated in MySQL (could be many); they
  * are matched OS-side via the share_scope field branch.
@@ -389,9 +389,10 @@ export async function searchDocsHandler(req: Request, res: Response) {
   // the queried space sees its anyone_in_space docs (fail-closed on lookup error).
   const isSpaceMember = await resolveViewerSpaceMembership(req)
 
-  // 1. MySQL: the caller's private/explicitly-granted visible doc_id set (small).
-  //    Space-share is NOT enumerated here — it is pushed to OS as share_scope=1.
-  const visibleDocIds = await docMetaRepo.listVisibleDocIdSet({ uid, spaceId, ownedBots, docType })
+  // 1. MySQL: the caller's visible doc_id set (private + explicitly-granted +,
+  //    for a confirmed member, space-share). All gated by status=1 in MySQL, so
+  //    soft-deleted docs are absent here regardless of what OS still holds.
+  const visibleDocIds = await docMetaRepo.listVisibleDocIdSet({ uid, spaceId, ownedBots, docType, isSpaceMember })
 
   // 2. OS: full-text match with the visibility constraint pushed down as a filter,
   //    paginated by OS. Empty private set AND non-member short-circuits to total=0
@@ -403,7 +404,6 @@ export async function searchDocsHandler(req: Request, res: Response) {
       query: q.trim(),
       docType,
       visibleDocIds,
-      isSpaceMember,
       from,
       size: pageSize,
     })

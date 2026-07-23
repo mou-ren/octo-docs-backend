@@ -30,14 +30,13 @@ function osResponse(hits: unknown[], total: number) {
   return { body: { hits: { total: { value: total }, hits } } }
 }
 
-describe('searchDocs — constraint down-push + OS pagination', () => {
-  it('member + private set: filter has BOTH terms doc_id AND term share_scope=1, minimum_should_match=1', async () => {
+describe('searchDocs — visible-set down-push + OS pagination', () => {
+  it('pushes the visible doc_id set down as a terms filter (no share_scope branch)', async () => {
     searchSpy.mockResolvedValue(osResponse([], 0))
     await searchDocs({
       spaceId: 's1',
       query: 'hello',
       visibleDocIds: ['d1', 'd2'],
-      isSpaceMember: true,
       from: 0,
       size: 20,
     })
@@ -51,53 +50,21 @@ describe('searchDocs — constraint down-push + OS pagination', () => {
     const filter = arg.body.query.bool.filter
     expect(filter).toContainEqual({ term: { space_id: 's1' } })
     expect(filter).toContainEqual({ term: { status: 1 } })
-    const shouldClause = filter.find((f) => 'bool' in f) as { bool: { should: unknown[]; minimum_should_match: number } }
-    expect(shouldClause.bool.minimum_should_match).toBe(1)
-    expect(shouldClause.bool.should).toContainEqual({ terms: { doc_id: ['d1', 'd2'] } })
-    expect(shouldClause.bool.should).toContainEqual({ term: { share_scope: 1 } })
+    // Visibility is a single terms doc_id filter now — no bool.should/share_scope.
+    expect(filter).toContainEqual({ terms: { doc_id: ['d1', 'd2'] } })
+    expect(filter.find((f) => 'bool' in f)).toBeUndefined()
   })
 
-  it('non-member: should has ONLY terms doc_id (no share_scope branch)', async () => {
-    searchSpy.mockResolvedValue(osResponse([], 0))
-    await searchDocs({
-      spaceId: 's1',
-      query: 'x',
-      visibleDocIds: ['d1'],
-      isSpaceMember: false,
-      from: 0,
-      size: 20,
-    })
-    const arg = searchSpy.mock.calls[0]![0] as { body: { query: { bool: { filter: Array<Record<string, unknown>> } } } }
-    const shouldClause = arg.body.query.bool.filter.find((f) => 'bool' in f) as { bool: { should: unknown[] } }
-    expect(shouldClause.bool.should).toEqual([{ terms: { doc_id: ['d1'] } }])
-  })
-
-  it('empty private set AND non-member => total=0 WITHOUT calling OpenSearch', async () => {
+  it('empty visible set => total=0 WITHOUT calling OpenSearch', async () => {
     const res = await searchDocs({
       spaceId: 's1',
       query: 'x',
       visibleDocIds: [],
-      isSpaceMember: false,
       from: 0,
       size: 20,
     })
     expect(res).toEqual({ total: 0, items: [] })
     expect(searchSpy).not.toHaveBeenCalled()
-  })
-
-  it('member with empty private set still searches (share_scope only)', async () => {
-    searchSpy.mockResolvedValue(osResponse([], 0))
-    await searchDocs({
-      spaceId: 's1',
-      query: 'x',
-      visibleDocIds: [],
-      isSpaceMember: true,
-      from: 0,
-      size: 20,
-    })
-    const arg = searchSpy.mock.calls[0]![0] as { body: { query: { bool: { filter: Array<Record<string, unknown>> } } } }
-    const shouldClause = arg.body.query.bool.filter.find((f) => 'bool' in f) as { bool: { should: unknown[] } }
-    expect(shouldClause.bool.should).toEqual([{ term: { share_scope: 1 } }])
   })
 
   it('docType => terms doc_type filter branch is added', async () => {
@@ -107,7 +74,6 @@ describe('searchDocs — constraint down-push + OS pagination', () => {
       query: 'x',
       docType: ['doc', 'sheet'],
       visibleDocIds: ['d1'],
-      isSpaceMember: false,
       from: 0,
       size: 20,
     })
@@ -136,7 +102,6 @@ describe('searchDocs — constraint down-push + OS pagination', () => {
       spaceId: 's1',
       query: 'x',
       visibleDocIds: ['d1', 'd2'],
-      isSpaceMember: true,
       from: 0,
       size: 20,
     })
@@ -152,7 +117,6 @@ describe('searchDocs — constraint down-push + OS pagination', () => {
       spaceId: 's1',
       query: 'x',
       visibleDocIds: ['d1'],
-      isSpaceMember: true,
       from: 40,
       size: 10,
     })
@@ -164,7 +128,7 @@ describe('searchDocs — constraint down-push + OS pagination', () => {
   it('throws on OpenSearch error (route maps to 503)', async () => {
     searchSpy.mockRejectedValue(new Error('cluster down'))
     await expect(
-      searchDocs({ spaceId: 's1', query: 'x', visibleDocIds: ['d1'], isSpaceMember: true, from: 0, size: 20 }),
+      searchDocs({ spaceId: 's1', query: 'x', visibleDocIds: ['d1'], from: 0, size: 20 }),
     ).rejects.toThrow('cluster down')
   })
 })

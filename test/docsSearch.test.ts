@@ -67,7 +67,7 @@ beforeEach(() => {
 })
 
 describe('POST /api/v1/docs/search — searchDocsHandler', () => {
-  it('member + private set: pushes BOTH the private doc_id set AND share_scope down to OS (isSpaceMember=true)', async () => {
+  it('member: passes isSpaceMember=true to listVisibleDocIdSet so space-share is folded into the visible set, then pushes that set to OS', async () => {
     isSpaceMemberMock.mockResolvedValue(true)
     vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue(['d_priv1', 'd_priv2'])
     searchDocsMock.mockResolvedValue({
@@ -80,17 +80,17 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     await searchDocsHandler(req({ body: { q: 'hello' } }), res as never)
 
     expect(res.statusCode).toBe(200)
-    // MySQL computed the private/explicit set for this caller + space.
+    // MySQL computed the full visible set for this caller + space, WITH the member flag.
     const listArg = vi.mocked(docMetaRepo.listVisibleDocIdSet).mock.calls[0]![0]
-    expect(listArg).toMatchObject({ uid: 'u_1', spaceId: 's_target' })
-    // The constraint was pushed DOWN to OS: private set + member flag + space.
+    expect(listArg).toMatchObject({ uid: 'u_1', spaceId: 's_target', isSpaceMember: true })
+    // Only the resolved doc_id set is pushed to OS — no isSpaceMember/share_scope.
     const osArg = searchDocsMock.mock.calls[0]![0]
     expect(osArg).toMatchObject({
       spaceId: 's_target',
       query: 'hello',
       visibleDocIds: ['d_priv1', 'd_priv2'],
-      isSpaceMember: true,
     })
+    expect(osArg.isSpaceMember).toBeUndefined()
 
     const body = res.body as { total: number; items: Array<{ docId: string; title: string; docType: string; updatedAt: number; highlight?: string; role?: unknown; score?: unknown }> }
     expect(body.total).toBe(1)
@@ -100,7 +100,7 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     expect(body.items[0]!.score).toBeUndefined()
   })
 
-  it('non-member: pushes isSpaceMember=false so OS omits the share_scope branch (only the private set)', async () => {
+  it('non-member: passes isSpaceMember=false to listVisibleDocIdSet (space-share excluded from the set)', async () => {
     isSpaceMemberMock.mockResolvedValue(false)
     vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue(['d_priv1'])
     searchDocsMock.mockResolvedValue({ total: 0, items: [] })
@@ -108,16 +108,17 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     await searchDocsHandler(req({ body: { q: 'x' } }), res as never)
 
     expect(res.statusCode).toBe(200)
+    const listArg = vi.mocked(docMetaRepo.listVisibleDocIdSet).mock.calls[0]![0]
+    expect(listArg).toMatchObject({ isSpaceMember: false })
     const osArg = searchDocsMock.mock.calls[0]![0]
-    expect(osArg.isSpaceMember).toBe(false)
     expect(osArg.visibleDocIds).toEqual(['d_priv1'])
+    expect(osArg.isSpaceMember).toBeUndefined()
   })
 
-  it('empty private set AND non-member => the constraint pushed to OS has no visible branch (searchDocs short-circuits to total=0)', async () => {
+  it('empty visible set => the set pushed to OS is empty and total=0 (searchDocs short-circuits without hitting OS)', async () => {
     // The no-OS-call short-circuit lives INSIDE searchDocs (osClient), covered by
     // its own unit test (osClientSearch.test.ts). At the route level searchDocs is
-    // mocked, so here we assert the route pushes the empty/non-member constraint
-    // down and returns total=0.
+    // mocked, so here we assert the route pushes the empty visible set down.
     isSpaceMemberMock.mockResolvedValue(false)
     vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue([])
     searchDocsMock.mockResolvedValue({ total: 0, items: [] })
@@ -128,7 +129,6 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     expect(res.body).toEqual({ total: 0, items: [] })
     const osArg = searchDocsMock.mock.calls[0]![0]
     expect(osArg.visibleDocIds).toEqual([])
-    expect(osArg.isSpaceMember).toBe(false)
   })
 
   it('pagination params (from/size) are passed to OS', async () => {
