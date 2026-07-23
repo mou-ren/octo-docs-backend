@@ -218,6 +218,16 @@ export const config = {
     maxCandidates: num('SEARCH_MAX_CANDIDATES', 200),
     // Upper bound a caller's pageSize is clamped to.
     pageSizeMax: num('SEARCH_PAGE_SIZE_MAX', 50),
+    // --- Producer side (#115): the afterStoreDocument / html-create / acl hooks
+    // enqueue a tiny {documentName} signal onto a Redis list for a separate
+    // indexer to consume. Default OFF (gray release): while disabled the hooks
+    // are inert, so the queue never grows before a consumer exists.
+    indexEnabled: bool('SEARCH_INDEX_ENABLED', false),
+    // Safety cap on the shared-Redis index LIST: each push LTRIMs to this many
+    // newest entries so an absent/lagging consumer can't grow it without bound
+    // and OOM the shared instance. Under sustained overflow the oldest signals
+    // are dropped (best-effort). Rollout: deploy the consumer before enabling.
+    queueMax: posIntMin('SEARCH_INDEX_QUEUE_MAX', 100_000, 1),
   },
 
   // Per-IP request throttle applied to the REST route chains (§8.4). Guards the
@@ -658,20 +668,6 @@ export const config = {
     retainCount: num('AUTO_RETAIN_COUNT', 50),
     // retention: drop auto rows older than this many days.
     retainDays: num('AUTO_RETAIN_DAYS', 7),
-  },
-
-  // Full-text search index feed (§3.3a). When enabled, the collab
-  // afterStoreDocument hook enqueues a tiny {documentName} signal onto a Redis
-  // list for a separate indexer to consume. Default OFF (gray release): while
-  // disabled the hook is inert, so the queue never grows before a consumer
-  // exists.
-  search: {
-    indexEnabled: bool('SEARCH_INDEX_ENABLED', false),
-    // Safety cap on the shared-Redis index LIST: each push LTRIMs to this many
-    // newest entries so an absent/lagging consumer can't grow it without bound
-    // and OOM the shared instance. Under sustained overflow the oldest signals
-    // are dropped (best-effort). Rollout: deploy the consumer before enabling.
-    queueMax: posIntMin('SEARCH_INDEX_QUEUE_MAX', 100_000, 1),
   },
 
   // FEAT-B recent-view retention. doc_view_history rows are pruned synchronously
