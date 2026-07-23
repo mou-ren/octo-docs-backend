@@ -51,18 +51,18 @@ const COLOR_RE = /^#[0-9a-fA-F]{6}$/
 const NAME_MAX_LEN = 64
 
 /**
- * Whether a documentName refers to a Yjs-backed text document whose body should
- * be fed to the full-text search index via THIS hook (§3.3a). Only 'document'
- * (doc / sheet — 4-seg keys) has an authoritative Yjs body flowing through the
- * store path. Whiteboards carry no searchable text. Html docs ARE indexed, but
- * their body lives in the external octo-doc service and never reaches the Yjs
- * store, so they are fed by a SEPARATE producer at the html registration route
- * (see createDocHandler) — NOT here. Parse failures are treated as non-indexable
- * (never throws — this gates a best-effort side channel).
+ * Whether a documentName refers to a Yjs-backed document whose body should be
+ * fed to the full-text search index via THIS hook (§3.3a). 'document' (doc /
+ * sheet, 4-seg) and 'whiteboard' (board, 5-seg `:wb:` key, doc_type='board')
+ * both have an authoritative Yjs body flowing through the store path, so both
+ * are indexed here. Html docs are EXCLUDED this期 (their body lives in the
+ * external octo-doc service and never reaches the Yjs store). Parse failures are
+ * treated as non-indexable (never throws — this gates a best-effort side channel).
  */
 function isIndexableDocument(documentName: string): boolean {
   try {
-    return parseDocumentName(documentName).kind === 'document'
+    const kind = parseDocumentName(documentName).kind
+    return kind === 'document' || kind === 'whiteboard'
   } catch {
     return false
   }

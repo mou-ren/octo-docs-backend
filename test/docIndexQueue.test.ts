@@ -49,8 +49,8 @@ describe('isSearchIndexedDoc — which docs get enqueued', () => {
   it('rejects html (5-seg) keys — html excluded at the producer this期', () => {
     expect(isSearchIndexedDoc('octo:sp1:fol1:html:doc2')).toBe(false)
   })
-  it('rejects whiteboards (no searchable body)', () => {
-    expect(isSearchIndexedDoc('octo:sp1:fol1:wb:board1')).toBe(false)
+  it('accepts whiteboards (board, :wb: key — has an extractable Yjs body)', () => {
+    expect(isSearchIndexedDoc('octo:sp1:fol1:wb:board1')).toBe(true)
   })
   it('rejects malformed names (parse failure => fail-safe drop)', () => {
     expect(isSearchIndexedDoc('not-a-doc-name')).toBe(false)

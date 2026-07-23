@@ -52,15 +52,16 @@ export function docIndexQueueKey(): string {
 export type DocIndexKind = 'body' | 'acl'
 
 /**
- * Whether a documentName has a searchable body worth enqueuing. Only 'document'
- * (doc / sheet) is indexed this期. Whiteboards (board) and html are EXCLUDED at
- * the producer so their body/acl events are never enqueued — the consumer would
- * skip html anyway, and board indexing is out of scope. Parse failures => not
- * indexed (best-effort gate, never throws).
+ * Whether a documentName has a searchable body worth enqueuing. Indexed this期:
+ * 'document' (doc / sheet) and 'whiteboard' (board, `:wb:` key / doc_type='board')
+ * — both have a Yjs body the consumer can extract. Html is EXCLUDED at the
+ * producer (its body lives in the external octo-doc service; the consumer skips
+ * html anyway). Parse failures => not indexed (best-effort gate, never throws).
  */
 export function isSearchIndexedDoc(documentName: string): boolean {
   try {
-    return parseDocumentName(documentName).kind === 'document'
+    const kind = parseDocumentName(documentName).kind
+    return kind === 'document' || kind === 'whiteboard'
   } catch {
     return false
   }
