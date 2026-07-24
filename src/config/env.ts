@@ -161,10 +161,6 @@ export function resolveCardDisplayTimeZone(raw: string): string {
   return value
 }
 
-// REDIS_PREFIX is read once here so both redis.prefix and the search index
-// stream key can share it (a plain object literal can't self-reference).
-const redisPrefix = str('REDIS_PREFIX', 'octo-docs')
-
 export const config = {
   hostname: str('HOSTNAME', 'octo-docs-local'),
   hocuspocusPort: num('HOCUSPOCUS_PORT', 1234),
@@ -187,7 +183,7 @@ export const config = {
   redis: {
     host: str('REDIS_HOST', '127.0.0.1'),
     port: num('REDIS_PORT', 6379),
-    prefix: redisPrefix,
+    prefix: str('REDIS_PREFIX', 'octo-docs'),
   },
 
   // Full-text search (P4). OpenSearch holds the doc/sheet/board body index
