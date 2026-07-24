@@ -39,6 +39,7 @@ export function getOsClient(): Client {
       ...(opensearchUsername !== '' && opensearchPassword !== ''
         ? { auth: { username: opensearchUsername, password: opensearchPassword } }
         : {}),
+      ...(ssl ? { ssl } : {}),
     })
   }
   return client
@@ -50,6 +51,7 @@ export interface SearchItem {
   title: string
   docType: string
   updatedAt: number | null
+  spaceId: string
   highlight?: string
 }
 
@@ -60,7 +62,7 @@ export interface SearchItem {
  */
 interface OsHit {
   _id?: string
-  _source?: { doc_id?: string; title?: string; doc_type?: string; updated_at?: number }
+  _source?: { doc_id?: string; title?: string; doc_type?: string; updated_at?: number; space_id?: string }
   highlight?: { body?: string[] }
 }
 interface OsSearchBody {
@@ -125,7 +127,7 @@ export async function searchDocs(params: {
     body: {
       from: params.from,
       size: params.size,
-      _source: ['doc_id', 'title', 'doc_type', 'updated_at'],
+      _source: ['doc_id', 'title', 'doc_type', 'updated_at', 'space_id'],
       query: {
         bool: {
           must: [
@@ -159,6 +161,7 @@ export async function searchDocs(params: {
       title: typeof h._source?.title === 'string' ? h._source.title : '',
       docType: typeof h._source?.doc_type === 'string' ? h._source.doc_type : '',
       updatedAt: typeof h._source?.updated_at === 'number' ? h._source.updated_at : null,
+      spaceId: typeof h._source?.space_id === 'string' ? h._source.space_id : '',
       ...(typeof fragment === 'string' && fragment !== '' ? { highlight: fragment } : {}),
     })
   }

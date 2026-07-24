@@ -81,13 +81,13 @@ describe('searchDocs — visible-set down-push + OS pagination', () => {
     expect(arg.body.query.bool.filter).toContainEqual({ terms: { doc_type: ['doc', 'sheet'] } })
   })
 
-  it('maps _source (title/doc_type/updated_at) + highlight, reads total from hits.total.value', async () => {
+  it('maps _source (title/doc_type/updated_at/space_id) + highlight, reads total from hits.total.value', async () => {
     searchSpy.mockResolvedValue(
       osResponse(
         [
           {
             _id: 'd1',
-            _source: { doc_id: 'd1', title: 'Title One', doc_type: 'doc', updated_at: 1700 },
+            _source: { doc_id: 'd1', title: 'Title One', doc_type: 'doc', updated_at: 1700, space_id: 's1' },
             highlight: { body: ['…frag…'] },
           },
           {
@@ -106,8 +106,9 @@ describe('searchDocs — visible-set down-push + OS pagination', () => {
       size: 20,
     })
     expect(res.total).toBe(7)
-    expect(res.items[0]).toEqual({ docId: 'd1', title: 'Title One', docType: 'doc', updatedAt: 1700, highlight: '…frag…' })
-    expect(res.items[1]).toEqual({ docId: 'd2', title: 'Title Two', docType: 'sheet', updatedAt: 1800 })
+    expect(res.items[0]).toEqual({ docId: 'd1', title: 'Title One', docType: 'doc', updatedAt: 1700, spaceId: 's1', highlight: '…frag…' })
+    // d2's _source has no space_id → spaceId falls back to '' (defensive read).
+    expect(res.items[1]).toEqual({ docId: 'd2', title: 'Title Two', docType: 'sheet', updatedAt: 1800, spaceId: '' })
     expect(res.items[1]!.highlight).toBeUndefined()
   })
 

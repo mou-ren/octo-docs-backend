@@ -73,7 +73,7 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     searchDocsMock.mockResolvedValue({
       total: 1,
       items: [
-        { docId: 'd_priv1', title: 'One', docType: 'doc', updatedAt: 1000, highlight: '…hit…' },
+        { docId: 'd_priv1', title: 'One', docType: 'doc', updatedAt: 1000, spaceId: 's_target', highlight: '…hit…' },
       ],
     })
     const res = mockRes()
@@ -92,9 +92,9 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     })
     expect(osArg.isSpaceMember).toBeUndefined()
 
-    const body = res.body as { total: number; items: Array<{ docId: string; title: string; docType: string; updatedAt: number; highlight?: string; role?: unknown; score?: unknown }> }
+    const body = res.body as { total: number; items: Array<{ docId: string; title: string; docType: string; updatedAt: number; spaceId?: string; highlight?: string; role?: unknown; score?: unknown }> }
     expect(body.total).toBe(1)
-    expect(body.items[0]).toMatchObject({ docId: 'd_priv1', title: 'One', docType: 'doc', updatedAt: 1000, highlight: '…hit…' })
+    expect(body.items[0]).toMatchObject({ docId: 'd_priv1', title: 'One', docType: 'doc', updatedAt: 1000, spaceId: 's_target', highlight: '…hit…' })
     // §6.3: no role, no score in the response.
     expect(body.items[0]!.role).toBeUndefined()
     expect(body.items[0]!.score).toBeUndefined()

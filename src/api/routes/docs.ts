@@ -421,6 +421,7 @@ export async function searchDocsHandler(req: Request, res: Response) {
       title: it.title,
       docType: it.docType,
       updatedAt: it.updatedAt,
+      spaceId: it.spaceId,
       ...(it.highlight ? { highlight: it.highlight } : {}),
     })),
   })
