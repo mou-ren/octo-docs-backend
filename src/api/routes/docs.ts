@@ -355,8 +355,12 @@ docsRouter.get('/', listDocsHandler)
  * `doc_id IN <set>` filter (§5.4), alongside space + status. OS then does the
  * FULL-TEXT match, highlight, AND pagination — every hit
  * is already within the caller's access, so there is NO per-hit MySQL re-check
- * (§6.4). anyone_in_space docs are never enumerated in MySQL (could be many); they
- * are matched OS-side via the share_scope field branch.
+ * (§6.4). For space members, anyone_in_space docs ARE enumerated into that set
+ * in MySQL (docMetaRepo adds `OR m.share_scope = ANYONE`), trading scale for a
+ * clean fail-closed doc_id filter that also drops stale/soft-deleted OS copies.
+ * NOTE: a very large space can push visibleDocIds past OpenSearch
+ * `index.max_terms_count` (default 65536), which surfaces as a 503; bound this
+ * before enabling search on large spaces.
  *
  * Registered BEFORE the '/:docId' routes so the '/search' literal is never
  * shadowed by the single-doc param route.
