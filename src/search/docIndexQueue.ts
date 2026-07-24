@@ -10,37 +10,32 @@
  * for a doc, read once): the stream itself does not dedupe, so a burst of edits
  * appends one entry each.
  *
- * Transport: a Redis STREAM over the shared ioredis client (XADD here; the
- * indexer XREADGROUPs via a consumer group with PEL/XACK/XCLAIM/DLQ for
- * at-least-once delivery). The stream key MUST byte-match the indexer's
- * STREAM_KEY (config.search.indexStreamKey, default `${REDIS_PREFIX}:doc-index`,
- * e.g. 'octo-docs-test:doc-index'). The payload is a single JSON field
- * `payload` holding {documentName,kind,ts}; the indexer JSON.parses it. The
- * consumer / indexer / OpenSearch wiring is intentionally out of scope for this
- * module.
+ * Transport: a Kafka topic (config.kafka.topic, default `octo.docindex.v1`)
+ * produced to here; the separate octo-doc-indexer consumes it via a consumer
+ * group with a retry topic + DLQ for at-least-once delivery. The message key is
+ * the documentName (so all signals for one doc land on the same partition and
+ * stay in order); the value is the JSON {documentName,kind,ts} the indexer
+ * JSON.parses. The consumer / indexer / OpenSearch wiring is intentionally out
+ * of scope for this module.
  *
- * Bounded: because the stream lives on the SHARED Redis (also backing epoch
- * cache, pub/sub and the connection registry), an absent/lagging consumer must
- * not grow it without limit and OOM the shared instance. Each XADD therefore
- * trims with MAXLEN ~ config.search.queueMax. This is a safety valve, not a
- * guarantee: under sustained overflow the OLDEST entries are dropped. Rollout
- * contract: deploy the consumer BEFORE flipping SEARCH_INDEX_ENABLED on.
+ * Growth is bounded by the topic's own retention (an ops concern), not by this
+ * producer — so there is no MAXLEN-style trim here. Rollout contract: deploy the
+ * consumer BEFORE flipping SEARCH_INDEX_ENABLED on.
  *
- * This is a best-effort side channel: an XADD failure must NEVER disturb the
+ * This is a best-effort side channel: a send failure must NEVER disturb the
  * collab store path, so callers fire-and-forget and every error is swallowed
  * after logging.
  */
-import { getRedis } from '../db/redis.js'
+import { getKafkaProducer } from '../db/kafka.js'
 import { parseDocumentName } from '../permission/documentName.js'
 import { config } from '../config/env.js'
 
 /**
- * Redis STREAM key holding pending index signals. Namespaced via REDIS_PREFIX
- * (config.search.indexStreamKey) to match every other doc-backend key on the
- * shared Redis; the indexer's STREAM_KEY env MUST be set to the same value.
+ * Kafka topic index signals are produced to. The indexer's DOCINDEX_KAFKA_TOPIC
+ * env MUST be set to the same value.
  */
-export function docIndexQueueKey(): string {
-  return config.search.indexStreamKey
+export function docIndexTopic(): string {
+  return config.kafka.topic
 }
 
 /**
@@ -69,9 +64,8 @@ export function isSearchIndexedDoc(documentName: string): boolean {
 }
 
 /**
- * Shape of one index signal, serialized as JSON into the stream's `payload`
- * field by enqueueDocIndex. The indexer reads obj.payload and JSON.parses it
- * back into this shape.
+ * Shape of one index signal, serialized as the JSON message value by
+ * enqueueDocIndex. The indexer JSON.parses the message value back into this shape.
  */
 export interface DocIndexSignal {
   /** Canonical collab key `octo:<space>:<folder>:<doc>`; consumer parses/reads by it. */
@@ -88,9 +82,9 @@ export interface DocIndexSignal {
 }
 
 /**
- * Push a change signal onto the index stream. Best-effort: never throws — a
- * Redis hiccup here must not fail the surrounding store. Returns true if the
- * XADD was accepted by Redis, false if it was swallowed.
+ * Push a change signal onto the index topic. Best-effort: never throws — a Kafka
+ * hiccup here must not fail the surrounding store. Returns true if the send was
+ * accepted, false if it was swallowed.
  */
 export async function enqueueDocIndex(
   documentName: string,
@@ -98,22 +92,16 @@ export async function enqueueDocIndex(
 ): Promise<boolean> {
   const signal: DocIndexSignal = { documentName, kind, ts: Date.now() }
   try {
-    const key = docIndexQueueKey()
-    // XADD with an approximate MAXLEN trim (~) so the shared Redis can drop whole
-    // macro-nodes cheaply and the stream can't grow unbounded when no consumer is
-    // draining. The whole signal is JSON-serialized into a single `payload`
-    // field; the indexer reads obj.payload and JSON.parses it. ts is DIAGNOSTIC
-    // ONLY (see DocIndexSignal) — the indexer derives its OpenSearch version from
-    // the DB, never from ts.
-    await getRedis().xadd(
-      key,
-      'MAXLEN',
-      '~',
-      config.search.queueMax,
-      '*',
-      'payload',
-      JSON.stringify(signal),
-    )
+    // key = documentName so every signal for one doc hashes to the same
+    // partition and stays ordered; value = the whole signal as JSON, which the
+    // indexer JSON.parses. ts is DIAGNOSTIC ONLY (see DocIndexSignal) — the
+    // indexer derives its OpenSearch version from the DB, never from ts.
+    const producer = await getKafkaProducer()
+    await producer.send({
+      topic: config.kafka.topic,
+      acks: config.kafka.acks,
+      messages: [{ key: documentName, value: JSON.stringify(signal) }],
+    })
     return true
   } catch (err) {
     // documentName is externally controlled (derived from client-supplied doc

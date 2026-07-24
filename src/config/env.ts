@@ -27,16 +27,6 @@ function numMin(name: string, fallback: number, min: number): number {
   return Math.max(min, n)
 }
 
-// Positive-integer env var clamped to at least `min`. Unlike numMin this also
-// floors fractional input and rejects non-finite values (Infinity/NaN), so a
-// bogus value can't reach a consumer (e.g. a Redis LTRIM count) as a fraction
-// or infinity and either silently defeat the cap or throw a command error.
-export function posIntMin(name: string, fallback: number, min: number): number {
-  const n = num(name, fallback)
-  if (!Number.isFinite(n)) return fallback
-  return Math.max(min, Math.floor(n))
-}
-
 function bool(name: string, fallback: boolean): boolean {
   const v = process.env[name]
   if (v === undefined || v === '') return fallback
@@ -222,31 +212,33 @@ export const config = {
     // rejected). Set to false ONLY for a trusted internal https endpoint you
     // can't otherwise validate; ignored for http nodes.
     opensearchTlsRejectUnauthorized: bool('OPENSEARCH_TLS_REJECT_UNAUTHORIZED', true),
-    // Upper bound on candidates pulled from OS before the DB permission
-    // intersection. Bounds the in-memory filter + pagination work per query.
-    maxCandidates: num('SEARCH_MAX_CANDIDATES', 200),
     // Upper bound a caller's pageSize is clamped to.
     pageSizeMax: num('SEARCH_PAGE_SIZE_MAX', 50),
-    // --- Producer side: the afterStoreDocument / html-create / acl hooks XADD a
-    // tiny {documentName,kind,ts} signal onto a Redis STREAM for a separate
-    // indexer (consumer group) to consume. Default OFF (gray release): while
-    // disabled the hooks are inert, so the stream never grows before a consumer
+    // --- Producer side: the afterStoreDocument hook sends a tiny
+    // {documentName,kind,ts} signal to a Kafka topic (config.kafka.topic) for a
+    // separate indexer (consumer group) to consume. Default OFF (gray release):
+    // while disabled the hook is inert, so nothing is produced before a consumer
     // exists.
     indexEnabled: bool('SEARCH_INDEX_ENABLED', false),
-    // Redis Stream key the producer XADDs to and the indexer XREADGROUPs from.
-    // MUST byte-match the indexer's STREAM_KEY. Default follows the shared
-    // REDIS_PREFIX namespace (e.g. 'octo-docs-test:doc-index' in test) so it
-    // stays consistent with every other doc-backend key on the shared Redis.
-    // LOCKSTEP: the indexer's STREAM_KEY env MUST be set to this same value
-    // (the indexer's own default is the unprefixed 'doc-index'). Change only in
-    // lockstep with the indexer deployment.
-    indexStreamKey: str('SEARCH_INDEX_STREAM_KEY', `${redisPrefix}:doc-index`),
-    // Safety cap on the shared-Redis stream: each XADD trims with MAXLEN ~ to
-    // roughly this many newest entries so an absent/lagging consumer can't grow
-    // it without bound and OOM the shared instance (approximate/'~' trim lets
-    // Redis drop whole macro-nodes cheaply). Rollout: deploy the consumer before
-    // enabling.
-    queueMax: posIntMin('SEARCH_INDEX_QUEUE_MAX', 100_000, 1),
+  },
+
+  // Kafka producer for the search doc-index signal channel (see
+  // search/docIndexQueue.ts). Only the doc-index producer uses Kafka; the
+  // consumer/retry/DLQ topics live in the separate octo-doc-indexer service.
+  kafka: {
+    // Comma-separated broker list (host:port,host:port). Default is a single
+    // local broker; set per environment at deploy time.
+    brokers: str('KAFKA_BROKERS', '127.0.0.1:9092')
+      .split(',')
+      .map((b) => b.trim())
+      .filter((b) => b !== ''),
+    // Topic the doc-index signal is produced to. MUST match the indexer's
+    // DOCINDEX_KAFKA_TOPIC. Change only in lockstep with the indexer deployment.
+    topic: str('DOCINDEX_KAFKA_TOPIC', 'octo.docindex.v1'),
+    // Produce ack level: 1 = leader ack (default, best-effort side channel), 0 =
+    // fire-and-forget, -1 = all in-sync replicas. Kept low since the signal is
+    // best-effort and the consumer re-reads authoritative data by key anyway.
+    acks: num('KAFKA_ACKS', 1),
   },
 
   // Per-IP request throttle applied to the REST route chains (§8.4). Guards the

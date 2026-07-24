@@ -17,7 +17,6 @@ const { mockConfig } = vi.hoisted(() => ({
       opensearchIndex: 'octo-doc',
       opensearchUsername: '',
       opensearchPassword: '',
-      maxCandidates: 200,
       pageSizeMax: 50,
     },
     webOrigin: '',
