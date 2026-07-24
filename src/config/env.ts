@@ -217,6 +217,11 @@ export const config = {
     // Optional basic-auth credentials. Empty (default) => no auth header.
     opensearchUsername: str('OPENSEARCH_USERNAME', ''),
     opensearchPassword: str('OPENSEARCH_PASSWORD', ''),
+    // TLS escape hatch for an https node with an untrusted (e.g. self-signed)
+    // cert. Default true = verify against the system trust store (self-signed is
+    // rejected). Set to false ONLY for a trusted internal https endpoint you
+    // can't otherwise validate; ignored for http nodes.
+    opensearchTlsRejectUnauthorized: bool('OPENSEARCH_TLS_REJECT_UNAUTHORIZED', true),
     // Upper bound on candidates pulled from OS before the DB permission
     // intersection. Bounds the in-memory filter + pagination work per query.
     maxCandidates: num('SEARCH_MAX_CANDIDATES', 200),

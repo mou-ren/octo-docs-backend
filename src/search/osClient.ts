@@ -26,6 +26,12 @@ let client: Client | null = null
 export function getOsClient(): Client {
   if (!client) {
     const { opensearchNode, opensearchUsername, opensearchPassword } = config.search
+    // https + explicit opt-out => disable cert verification (escape hatch for an
+    // internal self-signed node). http or default (verify on) => no ssl override.
+    const ssl =
+      opensearchNode.startsWith('https:') && config.search.opensearchTlsRejectUnauthorized === false
+        ? { rejectUnauthorized: false }
+        : undefined
     client = new Client({
       node: opensearchNode,
       // Basic auth only when both parts are configured; otherwise omit the header
