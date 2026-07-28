@@ -218,26 +218,12 @@ export async function createDocHandler(req: Request, res: Response) {
     await grantBotOwnerAdmin(req, meta.doc_id ?? docId, meta.document_name ?? documentName)
   }
 
-  // §3.3a/§3.3b (html search-index seam — the SECOND producer). An html doc's
-  // body is owned/rendered by the external octo-doc service and never flows
-  // through the Yjs store hooks, so the collab afterStoreDocument feed can't see
-  // it. This registration/upsert IS the html "content changed" signal (create AND
-  // the idempotent re-register both land here), so enqueue it as the index
-  // trigger; the consumer parses the html documentName and fetches the body from
-  // the external service.
-  //
-  // Emit BOTH body and acl: upsertHtmlByOctoDocSlug sets status=1, which on the
-  // idempotent-recovery path REVIVES a soft-deleted doc (0→1) with a plain
-  // UPDATE — no bumpEpoch/refreshAndPublish, so the acl channel would otherwise
-  // never learn the doc came back. A body signal alone re-reads only the body,
-  // leaving the index marked deleted/hidden. The acl signal resyncs status/ACL so
-  // revive is symmetric with soft-delete (which emits acl via refreshAndPublish).
-  // Best-effort, fire-and-forget, gated OFF by default — must never affect the
-  // create response. (A redundant acl on a fresh create is harmless under the
-  // consumer's "re-read latest" model.)
-  // NOTE: html docs are intentionally NOT fed to the search index this期 (board
-  // + html are excluded at the producer; isSearchIndexedDoc only accepts
-  // 'document'). The consumer skips html anyway, so no enqueue happens here.
+  // html docs are intentionally NOT fed to the search index this phase: board +
+  // html are excluded at the producer (isSearchIndexedDoc only accepts
+  // 'document'), and the consumer skips html anyway, so NO index signal is
+  // enqueued on this html registration/upsert path. (An html doc's body is
+  // owned/rendered by the external octo-doc service and never flows through the
+  // Yjs store hooks, so the collab afterStoreDocument feed can't see it either.)
   const responseDocId = resolvedDocType === HTML_DOC_TYPE ? (meta?.doc_id ?? docId) : docId
   const responseDocumentName = resolvedDocType === HTML_DOC_TYPE ? (meta?.document_name ?? documentName) : documentName
   const responseSpaceId = resolvedDocType === HTML_DOC_TYPE ? (meta?.space_id ?? spaceId) : spaceId

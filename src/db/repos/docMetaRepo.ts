@@ -391,14 +391,17 @@ export const docMetaRepo = {
 
   /**
    * Permission down-push for full-text search (P4, §5.3(a) / §5.4). Compute the
-   * caller's PRIVATE / EXPLICITLY-GRANTED visible doc_id set in `spaceId` — the
-   * SMALL set (docs the caller owns OR is a direct doc_member of) — so the route
-   * can push it into OpenSearch as a `terms: { doc_id: [...] }` filter branch.
+   * caller's visible doc_id set in `spaceId` so the route can push it into
+   * OpenSearch as a `terms: { doc_id: [...] }` filter branch.
    *
-   * Deliberately does NOT enumerate anyone_in_space (space-share) docs: those can
-   * be very many and would blow up the terms list. Space-share is handled OS-side
-   * by the `share_scope=1` field branch (added only for confirmed members), never
-   * enumerated here (§5.3(b)).
+   * The set is owner OR direct doc_member, PLUS space-share (share_scope=anyone)
+   * when the caller is a confirmed space member (fail-closed: a non-member
+   * collapses to owner OR doc_member). Space-share IS enumerated here (same
+   * predicate as listForUser's includeSpaceShare branch, #64) rather than being
+   * pushed to an OS-side share_scope branch: with the status=1 filter, a
+   * soft-deleted doc is simply absent from the set, so it cannot be searched even
+   * if OS still holds a stale copy — OS never needs to carry fresh share_scope /
+   * status. The trade-off is terms-list size for large space-share sets (§5.4).
    *
    * owner scope matches listForUser's owner='me' ownerSet: owner_id IN (uid,
    * ...ownedBots) (de-duped, empties stripped), so a user's own bot-created private
