@@ -15,11 +15,12 @@ vi.mock('../src/config/env.js', () => ({
       opensearchUsername: '',
       opensearchPassword: '',
       pageSizeMax: 50,
+      maxVisibleTerms: 65536,
     },
   },
 }))
 
-import { searchDocs } from '../src/search/osClient.js'
+import { searchDocs, VisibleTermsTooLargeError } from '../src/search/osClient.js'
 
 beforeEach(() => {
   searchSpy.mockReset()
@@ -146,5 +147,22 @@ describe('searchDocs — visible-set down-push + OS pagination', () => {
     await expect(
       searchDocs({ spaceId: 's1', query: 'x', visibleDocIds: ['d1'], from: 0, size: 20 }),
     ).rejects.toThrow('cluster down')
+  })
+
+  it('throws VisibleTermsTooLargeError (without hitting OS) when the visible set exceeds maxVisibleTerms', async () => {
+    // maxVisibleTerms is 65536 in the mock; build one more than that.
+    const tooMany = Array.from({ length: 65537 }, (_, i) => `d${i}`)
+    await expect(
+      searchDocs({ spaceId: 's1', query: 'x', visibleDocIds: tooMany, from: 0, size: 20 }),
+    ).rejects.toBeInstanceOf(VisibleTermsTooLargeError)
+    // Guard trips BEFORE the OS round-trip — no oversized terms clause is sent.
+    expect(searchSpy).not.toHaveBeenCalled()
+  })
+
+  it('allows a visible set exactly at the bound (boundary, does hit OS)', async () => {
+    searchSpy.mockResolvedValue(osResponse([], 0))
+    const atLimit = Array.from({ length: 65536 }, (_, i) => `d${i}`)
+    await searchDocs({ spaceId: 's1', query: 'x', visibleDocIds: atLimit, from: 0, size: 20 })
+    expect(searchSpy).toHaveBeenCalledTimes(1)
   })
 })

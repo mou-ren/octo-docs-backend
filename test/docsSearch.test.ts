@@ -28,13 +28,19 @@ vi.mock('../src/db/repos/docMetaRepo.js', () => ({
   docMetaRepo: { listVisibleDocIdSet: vi.fn() },
 }))
 const { searchDocsMock } = vi.hoisted(() => ({ searchDocsMock: vi.fn() }))
-vi.mock('../src/search/osClient.js', () => ({ searchDocs: searchDocsMock }))
+vi.mock('../src/search/osClient.js', async (importActual) => {
+  // Keep the real VisibleTermsTooLargeError class (route uses instanceof) while
+  // stubbing searchDocs itself.
+  const actual = await importActual<typeof import('../src/search/osClient.js')>()
+  return { ...actual, searchDocs: searchDocsMock }
+})
 const { isSpaceMemberMock } = vi.hoisted(() => ({ isSpaceMemberMock: vi.fn() }))
 vi.mock('../src/auth/octoIdentity.js', () => ({
   getOctoIdentity: () => ({ isSpaceMember: isSpaceMemberMock }),
 }))
 
 import { searchDocsHandler } from '../src/api/routes/docs.js'
+import { VisibleTermsTooLargeError } from '../src/search/osClient.js'
 import { docMetaRepo } from '../src/db/repos/docMetaRepo.js'
 
 interface MockRes {
@@ -195,5 +201,16 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     await searchDocsHandler(req({ body: { q: 'x' } }), res as never)
     expect(res.statusCode).toBe(503)
     expect(res.body).toEqual({ error: 'search unavailable' })
+  })
+
+  it('visible set too large => 503 with a distinct terms_limit_exceeded reason', async () => {
+    isSpaceMemberMock.mockResolvedValue(true)
+    vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue(['d1'])
+    searchDocsMock.mockRejectedValue(new VisibleTermsTooLargeError(70000, 65536))
+    const res = mockRes()
+    await searchDocsHandler(req({ body: { q: 'x' } }), res as never)
+    expect(res.statusCode).toBe(503)
+    // Distinct reason so a client narrows the query instead of blindly retrying.
+    expect(res.body).toEqual({ error: 'search unavailable', reason: 'terms_limit_exceeded' })
   })
 })
