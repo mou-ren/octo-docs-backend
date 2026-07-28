@@ -142,6 +142,10 @@ export async function searchDocs(params: {
         },
       },
       highlight: {
+        // encoder:'html' HTML-encodes the document body before wrapping matches
+        // in the highlight tags, so a document whose body contains HTML-like
+        // text cannot smuggle executable markup through the highlight fragment.
+        encoder: 'html',
         fields: { body: {} },
       },
     },

@@ -54,6 +54,22 @@ describe('searchDocs — visible-set down-push + OS pagination', () => {
     expect(filter.find((f) => 'bool' in f)).toBeUndefined()
   })
 
+  it('requests HTML-encoded highlights (encoder:html) so body markup cannot become an XSS sink', async () => {
+    searchSpy.mockResolvedValue(osResponse([], 0))
+    await searchDocs({
+      spaceId: 's1',
+      query: 'x',
+      visibleDocIds: ['d1'],
+      from: 0,
+      size: 20,
+    })
+    const arg = searchSpy.mock.calls[0]![0] as { body: { highlight: { encoder: string } } }
+    // Without encoder:'html', a document body containing HTML-like text would be
+    // copied verbatim into the highlight fragment and could execute if the client
+    // renders it as HTML. encoder:'html' makes OpenSearch encode the body first.
+    expect(arg.body.highlight.encoder).toBe('html')
+  })
+
   it('empty visible set => total=0 WITHOUT calling OpenSearch', async () => {
     const res = await searchDocs({
       spaceId: 's1',
