@@ -9,6 +9,7 @@ import { docMemberRepo } from '../../db/repos/docMemberRepo.js'
 import { docViewHistoryRepo } from '../../db/repos/docViewHistoryRepo.js'
 import { normalizeTypeFilter, HTML_DOC_TYPE } from '../../db/docType.js'
 import { buildDocumentName, buildHtmlDocumentName, DocumentNameError } from '../../permission/documentName.js'
+import { enqueueDocIndex, isSearchIndexedDoc } from '../../search/docIndexQueue.js'
 import { refreshAndPublish, bumpEpoch } from '../../permission/epoch.js'
 import { ROLE_ADMIN } from '../../permission/role.js'
 import {
@@ -25,7 +26,7 @@ import { buildDocShareUrl } from '../../util/docShareLink.js'
 import { config } from '../../config/env.js'
 import { getOctoIdentity } from '../../auth/octoIdentity.js'
 import { requireDocRole } from '../guard.js'
-import { searchDocs } from '../../search/osClient.js'
+import { searchDocs, VisibleTermsTooLargeError } from '../../search/osClient.js'
 
 export const docsRouter: ExpressRouter = Router()
 
@@ -397,7 +398,14 @@ export async function searchDocsHandler(req: Request, res: Response) {
       from,
       size: pageSize,
     })
-  } catch {
+  } catch (err) {
+    // A visible set too large to push down as a terms filter is a deterministic,
+    // caller-observable limit (not a transient OS outage) — surface a distinct
+    // reason so clients can narrow the query rather than blindly retry.
+    if (err instanceof VisibleTermsTooLargeError) {
+      res.status(503).json({ error: 'search unavailable', reason: 'terms_limit_exceeded' })
+      return
+    }
     res.status(503).json({ error: 'search unavailable' })
     return
   }
@@ -569,6 +577,18 @@ async function renameDocById(req: Request, res: Response, docId: string): Promis
     return
   }
   await docMetaRepo.rename(docId, title, req.uid!)
+  // Title lives in the search index (matched as title^2, returned as _source.title),
+  // so a rename must re-index or the new title is missed / the stale one keeps
+  // showing until an unrelated body edit reindexes. Enqueue a body signal: the
+  // indexer re-reads the latest authoritative state (including title) by
+  // documentName. Best-effort / fire-and-forget (enqueue swallows its own
+  // errors); gated OFF by default; html has no searchable body and is skipped.
+  if (config.search.indexEnabled) {
+    const documentName = await docMetaRepo.resolveDocumentName(docId)
+    if (documentName && isSearchIndexedDoc(documentName)) {
+      void enqueueDocIndex(documentName)
+    }
+  }
   res.status(200).json({ docId, title })
 }
 

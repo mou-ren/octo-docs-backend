@@ -19,6 +19,20 @@ import { config } from '../config/env.js'
 let client: Client | null = null
 
 /**
+ * Thrown when the caller's visible-doc-id set is larger than the configured
+ * bound (config.search.maxVisibleTerms), which would otherwise produce an OS
+ * `terms` clause exceeding `index.max_terms_count` and be rejected with an
+ * opaque error. The route catches this to return a deterministic 503 with a
+ * distinct reason instead of a generic OpenSearch failure.
+ */
+export class VisibleTermsTooLargeError extends Error {
+  constructor(public readonly count: number, public readonly max: number) {
+    super(`visible doc set (${count}) exceeds max terms (${max})`)
+    this.name = 'VisibleTermsTooLargeError'
+  }
+}
+
+/**
  * Lazily create the singleton OpenSearch client. Deferred (not built at module
  * load) so importing this file never opens a connection — the client is only
  * constructed the first time a search actually runs (search is default-OFF).
@@ -110,6 +124,14 @@ export async function searchDocs(params: {
   // skip OS entirely (§6.4). No share_scope branch: space-share is already folded
   // into visibleDocIds by listVisibleDocIdSet, so OS holds no permission truth.
   if (visibleDocIds.length === 0) return { total: 0, items: [] }
+
+  // Bound the down-pushed terms list: an oversized `terms doc_id` clause exceeds
+  // OpenSearch's index.max_terms_count and is rejected with an opaque error, so
+  // fail deterministically here (route -> 503 terms_limit_exceeded) rather than
+  // letting a large space silently 503 on the OS round-trip.
+  if (visibleDocIds.length > config.search.maxVisibleTerms) {
+    throw new VisibleTermsTooLargeError(visibleDocIds.length, config.search.maxVisibleTerms)
+  }
 
   const filter: Array<Record<string, unknown>> = [
     { term: { space_id: params.spaceId } },
