@@ -106,6 +106,29 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     expect(body.items[0]!.score).toBeUndefined()
   })
 
+  it('P1-1 fail-closed: does NOT widen the visible set to owned bots (search returns body highlights, so it must match the read guard, not owner=me list scope)', async () => {
+    vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue([])
+    const res = mockRes()
+    // A caller who owns bots — the owner=me LIST view widens to them, but a
+    // content-returning search endpoint must not.
+    await searchDocsHandler(req({ uid: 'u_1', ownedBots: ['bot_a', 'bot_b'], body: { q: 'x' } }), res as never)
+    const listArg = vi.mocked(docMetaRepo.listVisibleDocIdSet).mock.calls[0]![0]
+    // ownedBots is never forwarded, so a bot-owned doc with no doc_member row for
+    // the human stays out of the searchable set (parity with GET /content 403).
+    expect((listArg as Record<string, unknown>).ownedBots).toBeUndefined()
+  })
+
+  it('P1-2 bounded: caps the visible-set query at maxVisibleTerms by passing limit, so an oversized set is rejected before a large terms clause is built', async () => {
+    mockConfig.search.maxVisibleTerms = 50000
+    const res = mockRes()
+    await searchDocsHandler(req({ body: { q: 'x' } }), res as never)
+    const listArg = vi.mocked(docMetaRepo.listVisibleDocIdSet).mock.calls[0]![0]
+    // The route hands the bound down to the DB layer (which caps at limit+1),
+    // so overflow is detected on a bounded scan rather than after streaming the
+    // full set and allocating an N-element array on every keyset page.
+    expect((listArg as Record<string, unknown>).limit).toBe(50000)
+  })
+
   it('non-member: passes isSpaceMember=false to listVisibleDocIdSet (space-share excluded from the set)', async () => {
     isSpaceMemberMock.mockResolvedValue(false)
     vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue(['d_priv1'])

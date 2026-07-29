@@ -392,7 +392,6 @@ export async function searchDocsHandler(req: Request, res: Response) {
   // unknown/absent => no filter. Pushed to both the MySQL constraint and OS filter.
   const docType = normalizeTypeFilter(docTypeRaw)
   const pageSize = Math.min(config.search.pageSizeMax, Math.max(1, Number(pageSizeRaw ?? 20) || 20))
-  const ownedBots = req.ownedBots ?? []
   // Space-share visibility must match the list side: only a confirmed member of
   // the queried space sees its anyone_in_space docs (fail-closed on lookup error).
   const isSpaceMember = await resolveViewerSpaceMembership(req)
@@ -400,7 +399,18 @@ export async function searchDocsHandler(req: Request, res: Response) {
   // 1. MySQL: the caller's visible doc_id set (private + explicitly-granted +,
   //    for a confirmed member, space-share). All gated by status=1 in MySQL, so
   //    soft-deleted docs are absent here regardless of what OS still holds.
-  const visibleDocIds = await docMetaRepo.listVisibleDocIdSet({ uid, spaceId, ownedBots, docType, isSpaceMember })
+  //    Capped at maxVisibleTerms+1 rows: an oversized set is rejected below
+  //    (searchDocs throws VisibleTermsTooLargeError) before a large terms array
+  //    reaches OpenSearch, and the DB scan itself is bounded to limit+1 rather
+  //    than the true count. Recomputed on every keyset page (stateless paging),
+  //    so the bound also caps the per-page cost.
+  const visibleDocIds = await docMetaRepo.listVisibleDocIdSet({
+    uid,
+    spaceId,
+    docType,
+    isSpaceMember,
+    limit: config.search.maxVisibleTerms,
+  })
 
   // 2. OS: full-text match with the visibility constraint pushed down as a filter,
   //    keyset-paginated by OS via search_after. Empty visible set short-circuits to
