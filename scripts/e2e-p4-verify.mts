@@ -2,7 +2,9 @@
  * P4 end-to-end integration check: connects to a real MySQL + real OpenSearch and
  * runs the real docMetaRepo.listVisibleDocIdSet (real SQL permission constraints)
  * + searchDocs (real OS query/pagination) across multiple permission scenarios.
- * Only seeds e2e_-prefixed data and cleans it up precisely afterwards.
+ * Only seeds e2e_-prefixed data and cleans up exactly those seeded ids afterwards
+ * (precise IN-list delete, not a LIKE prefix). Point it at a dedicated dev/test
+ * MySQL — it issues hard DELETEs on doc_meta/doc_member for the seeded ids.
  *
  * Run with tsx inside octo_octo-net, using the mysql / search-opensearch aliases.
  * Auth boundaries are not tested here (covered by unit tests); this exercises the
@@ -38,8 +40,14 @@ const DOCS = [
 ]
 
 async function cleanup() {
-  await query(`DELETE FROM doc_member WHERE doc_id LIKE 'e2e_%'`, [])
-  await query(`DELETE FROM doc_meta WHERE doc_id LIKE 'e2e_%'`, [])
+  // Precise cleanup by explicit id list. NOTE: `LIKE 'e2e_%'` is WRONG here — in
+  // MySQL LIKE, `_` is a single-char wildcard, so it would also match `e2eXfoo`,
+  // `e2eabc123`, etc. and hard-DELETE unrelated documents. Enumerate the seeded
+  // ids instead so this is exactly the data we created — nothing else.
+  const ids = DOCS.map((d) => d.doc_id)
+  const ph = ids.map(() => '?').join(', ')
+  await query(`DELETE FROM doc_member WHERE doc_id IN (${ph})`, ids)
+  await query(`DELETE FROM doc_meta   WHERE doc_id IN (${ph})`, ids)
   const os = getOsClient()
   for (const d of DOCS) {
     try { await os.delete({ index: 'octo-doc', id: d.doc_id }) } catch { /* ignore 404 */ }

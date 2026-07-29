@@ -225,15 +225,18 @@ export const config = {
     // rejected). Set to false ONLY for a trusted internal https endpoint you
     // can't otherwise validate; ignored for http nodes.
     opensearchTlsRejectUnauthorized: strictBool('OPENSEARCH_TLS_REJECT_UNAUTHORIZED', true),
-    // Upper bound a caller's pageSize is clamped to.
-    pageSizeMax: num('SEARCH_PAGE_SIZE_MAX', 50),
+    // Upper bound a caller's pageSize is clamped to. Must be >= 1: numMin rejects
+    // 0/negative/fractional/Infinity (SEARCH_PAGE_SIZE_MAX=0 would make every
+    // search return an empty page while total reports a positive count).
+    pageSizeMax: numMin('SEARCH_PAGE_SIZE_MAX', 50, 1),
     // Upper bound on the size of the visibleDocIds set pushed down as an OS
     // `terms doc_id` filter. Guards against exceeding OpenSearch's
     // `index.max_terms_count` (default 65536): an oversized terms clause is
     // rejected by OS with an opaque error, so we bound it here and return a
     // deterministic 503 instead. Keep this <= the index's configured
-    // max_terms_count.
-    maxVisibleTerms: num('SEARCH_MAX_VISIBLE_TERMS', 65536),
+    // max_terms_count. Must be >= 1: numMin rejects 0/negative (0 would trip
+    // VisibleTermsTooLargeError on every non-empty set → search 503s permanently).
+    maxVisibleTerms: numMin('SEARCH_MAX_VISIBLE_TERMS', 65536, 1),
     // --- Producer side: the afterStoreDocument hook sends a tiny
     // {documentName,kind,ts} signal to a Kafka topic (config.kafka.topic) for a
     // separate indexer (consumer group) to consume. Default OFF (gray release):

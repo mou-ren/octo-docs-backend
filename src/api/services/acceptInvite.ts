@@ -166,10 +166,10 @@ export async function acceptInviteForUid(
   // (softDelete / setShareSettings / members / grantForward all publish
   // post-commit). Publishing pre-commit would announce a permission_epoch bump
   // that a concurrent reader could act on before the row is durably committed,
-  // and a rollback would leave a phantom cache-invalidation/reindex for a change
-  // that never landed. Best-effort: the accept is already committed, so a failure
-  // here only misses a cache refresh + reindex signal (the beforeHandleMessage
-  // recheck is the correctness backstop).
+  // and a rollback would leave a phantom cache-invalidation for a change that
+  // never landed. Best-effort: the accept is already committed, so a failure
+  // here only misses a cache refresh (the beforeHandleMessage recheck is the
+  // correctness backstop).
   if (pending.publish) {
     await refreshAndPublish(pending.publish.documentName, pending.publish.epoch, pending.publish.uid)
   }
