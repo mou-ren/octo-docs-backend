@@ -46,6 +46,17 @@ export function getOsClient(): Client {
       opensearchNode.startsWith('https:') && config.search.opensearchTlsRejectUnauthorized === false
         ? { rejectUnauthorized: false }
         : undefined
+    if (ssl) {
+      // Loud, one-time signal that cert verification is OFF against the store
+      // holding every document body — so a deliberate escape hatch is
+      // distinguishable from a correctly-configured cluster in the logs, and an
+      // accidental one is at least visible (P1-2: strictBool already blocks the
+      // typo path, this covers the intentional opt-out).
+      // eslint-disable-next-line no-console -- one-time construction-time security signal, same opt-in as bootstrap logging in index.ts
+      console.warn(
+        `[osClient] OPENSEARCH_TLS_REJECT_UNAUTHORIZED=false: TLS certificate verification is DISABLED for ${opensearchNode}. Only use this for a trusted internal endpoint.`,
+      )
+    }
     client = new Client({
       node: opensearchNode,
       // Basic auth only when both parts are configured; otherwise omit the header

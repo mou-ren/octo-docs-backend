@@ -94,7 +94,7 @@ async function run() {
   console.log('\n=== Scenario 1: isSpaceMember=true (visible set includes share, excludes soft-deleted) ===')
   const vids1 = await docMetaRepo.listVisibleDocIdSet({ uid: USER, spaceId: SP, isSpaceMember: true })
   allPass = eq('member visible set (own+mem+share; excludes none/arch/other_space/soft-deleted)', vids1.sort(), ['e2e_mem', 'e2e_own', 'e2e_share']) && allPass
-  const r1 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: vids1, from: 0, size: 50 })
+  const r1 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: vids1, size: 50 })
   const ids1 = r1.items.map((i) => i.docId).sort()
   allPass = eq('member search hits (own+mem+share)', ids1, ['e2e_mem', 'e2e_own', 'e2e_share']) && allPass
   allPass = eq('member search total', r1.total, 3) && allPass
@@ -103,7 +103,7 @@ async function run() {
   console.log('\n=== Scenario 2: isSpaceMember=false (share blocked by MySQL) ===')
   const vids2 = await docMetaRepo.listVisibleDocIdSet({ uid: USER, spaceId: SP, isSpaceMember: false })
   allPass = eq('non-member visible set (own+mem only, no share)', vids2.sort(), ['e2e_mem', 'e2e_own']) && allPass
-  const r2 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: vids2, from: 0, size: 50 })
+  const r2 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: vids2, size: 50 })
   const ids2 = r2.items.map((i) => i.docId).sort()
   allPass = eq('non-member search hits (own+mem only)', ids2, ['e2e_mem', 'e2e_own']) && allPass
   allPass = eq('non-member search total', r2.total, 2) && allPass
@@ -120,19 +120,24 @@ async function run() {
   )
   allPass = eq('soft-deleted doc in OS is still stale status=1 (blocked by MySQL, not OS)', osStale, 1) && allPass
 
-  // Scenario 3: pagination (member, size=2 across two pages)
-  console.log('\n=== Scenario 3: OS pagination size=2 ===')
-  const p1 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: vids1, from: 0, size: 2 })
-  const p2 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: vids1, from: 2, size: 2 })
+  // Scenario 3: keyset pagination (member, size=2 across two pages via search_after)
+  console.log('\n=== Scenario 3: OS keyset pagination size=2 ===')
+  const p1 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: vids1, size: 2 })
+  // Page 2 resumes from page 1's last-hit sort cursor — the keyset contract the
+  // route/front-end round-trip via nextCursor. A full page (2 of 2) MUST hand back
+  // a searchAfter; the short final page MUST return null so the client stops.
   allPass = eq('page1 total=3(track_total_hits)', p1.total, 3) && allPass
   allPass = eq('page1 returns 2 items', p1.items.length, 2) && allPass
+  allPass = eq('page1 (full) hands back a searchAfter cursor', Array.isArray(p1.searchAfter), true) && allPass
+  const p2 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: vids1, size: 2, searchAfter: p1.searchAfter ?? undefined })
   allPass = eq('page2 returns 1 item', p2.items.length, 1) && allPass
+  allPass = eq('page2 (short/final) hands back no cursor', p2.searchAfter, null) && allPass
   const pageIds = [...p1.items, ...p2.items].map((i) => i.docId).sort()
   allPass = eq('two pages merged = all 3 items, no dupes/gaps', pageIds, ['e2e_mem', 'e2e_own', 'e2e_share']) && allPass
 
   // Scenario 4: short-circuit (empty visible set → OS not hit)
   console.log('\n=== Scenario 4: short-circuit (empty visible set) ===')
-  const r4 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: [], from: 0, size: 50 })
+  const r4 = await searchDocs({ spaceId: SP, query: KW, visibleDocIds: [], size: 50 })
   allPass = eq('short-circuit total=0', r4.total, 0) && allPass
   allPass = eq('short-circuit items empty', r4.items, []) && allPass
 
@@ -143,13 +148,13 @@ async function run() {
 
   // Scenario 6: ik Chinese tokenizer hits the body (using '增长', a word only in body, not title)
   console.log('\n=== Scenario 6: ik body search ===')
-  const r6 = await searchDocs({ spaceId: SP, query: '增长', visibleDocIds: vids1, from: 0, size: 50 })
+  const r6 = await searchDocs({ spaceId: SP, query: '增长', visibleDocIds: vids1, size: 50 })
   allPass = eq('ik body search for the body-only term hits (proves body index + ik work)', r6.items.length > 0, true) && allPass
   allPass = eq('highlight fragment present', typeof r6.items[0]?.highlight === 'string', true) && allPass
 
   // Scenario 7: docType filter
   console.log('\n=== Scenario 7: docType filter ===')
-  const rT = await searchDocs({ spaceId: SP, query: KW, docType: ['sheet'], visibleDocIds: vids1, from: 0, size: 50 })
+  const rT = await searchDocs({ spaceId: SP, query: KW, docType: ['sheet'], visibleDocIds: vids1, size: 50 })
   allPass = eq('docType=sheet filter yields 0 hits (all seeded are doc)', rT.items.length, 0) && allPass
 
   console.log('\n=== cleanup ===')

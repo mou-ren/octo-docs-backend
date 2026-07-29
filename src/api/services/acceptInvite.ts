@@ -164,11 +164,12 @@ export async function acceptInviteForUid(
 
   // Publish the invalidation AFTER the tx commits, matching every other ACL path
   // (softDelete / setShareSettings / members / grantForward all publish
-  // post-commit). A pre-commit publish would let a consumer of the acl
-  // search-index signal (§3.3b) BRPOP it and re-read pre-commit ACL, and a
-  // rollback would leave a phantom reindex. Best-effort: the accept is already
-  // committed, so a failure here only misses a cache refresh + reindex signal
-  // (the beforeHandleMessage recheck is the correctness backstop).
+  // post-commit). Publishing pre-commit would announce a permission_epoch bump
+  // that a concurrent reader could act on before the row is durably committed,
+  // and a rollback would leave a phantom cache-invalidation/reindex for a change
+  // that never landed. Best-effort: the accept is already committed, so a failure
+  // here only misses a cache refresh + reindex signal (the beforeHandleMessage
+  // recheck is the correctness backstop).
   if (pending.publish) {
     await refreshAndPublish(pending.publish.documentName, pending.publish.epoch, pending.publish.uid)
   }

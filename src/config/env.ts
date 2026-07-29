@@ -34,6 +34,23 @@ function bool(name: string, fallback: boolean): boolean {
 }
 
 /**
+ * Strict boolean env parser. Unlike bool(), this rejects anything that is not
+ * exactly true|false|1|0 (case-insensitive, trimmed) rather than treating every
+ * unrecognized value as false. Use this for flags whose SAFE value is `true`
+ * (e.g. TLS cert verification), where bool()'s "unknown => false" fallback would
+ * silently flip the flag to its UNSAFE side on an operator typo (=treu, =yes,
+ * =on, =TRUE␣). Mirrors num(), which already throws on a non-number.
+ */
+function strictBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+  const v = raw.trim().toLowerCase()
+  if (v === 'true' || v === '1') return true
+  if (v === 'false' || v === '0') return false
+  throw new Error(`Env var ${name} must be one of true|false|1|0, got: ${raw}`)
+}
+
+/**
  * Parse the comma-separated `CORS_ALLOWED_ORIGINS` allowlist into trimmed,
  * non-empty entries (XIN-717). Lives here (not in api/cors.ts) so the config
  * module stays the single leaf that reads env, with no import cycle back from
@@ -207,7 +224,7 @@ export const config = {
     // cert. Default true = verify against the system trust store (self-signed is
     // rejected). Set to false ONLY for a trusted internal https endpoint you
     // can't otherwise validate; ignored for http nodes.
-    opensearchTlsRejectUnauthorized: bool('OPENSEARCH_TLS_REJECT_UNAUTHORIZED', true),
+    opensearchTlsRejectUnauthorized: strictBool('OPENSEARCH_TLS_REJECT_UNAUTHORIZED', true),
     // Upper bound a caller's pageSize is clamped to.
     pageSizeMax: num('SEARCH_PAGE_SIZE_MAX', 50),
     // Upper bound on the size of the visibleDocIds set pushed down as an OS
