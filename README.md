@@ -333,3 +333,4 @@ Honest accounting of what is **stubbed / deferred** for the next round:
   default-off alternative; not implemented.
 - **Integration tests** — only offline unit tests this round. No live
   MySQL/Redis integration suite yet.
+
