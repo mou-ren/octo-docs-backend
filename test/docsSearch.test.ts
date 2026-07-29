@@ -40,7 +40,7 @@ vi.mock('../src/auth/octoIdentity.js', () => ({
 }))
 
 import { searchDocsHandler } from '../src/api/routes/docs.js'
-import { VisibleTermsTooLargeError } from '../src/search/osClient.js'
+import { VisibleTermsTooLargeError, encodeSearchCursor, decodeSearchCursor } from '../src/search/osClient.js'
 import { docMetaRepo } from '../src/db/repos/docMetaRepo.js'
 
 interface MockRes {
@@ -66,7 +66,7 @@ beforeEach(() => {
   vi.mocked(docMetaRepo.listVisibleDocIdSet).mockReset()
   vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue([])
   searchDocsMock.mockReset()
-  searchDocsMock.mockResolvedValue({ total: 0, items: [] })
+  searchDocsMock.mockResolvedValue({ total: 0, items: [], searchAfter: null })
   isSpaceMemberMock.mockReset()
   isSpaceMemberMock.mockResolvedValue(true)
 })
@@ -80,6 +80,7 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
       items: [
         { docId: 'd_priv1', title: 'One', docType: 'doc', updatedAt: 1000, spaceId: 's_target', highlight: '…hit…' },
       ],
+      searchAfter: null,
     })
     const res = mockRes()
     await searchDocsHandler(req({ body: { q: 'hello' } }), res as never)
@@ -108,7 +109,7 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
   it('non-member: passes isSpaceMember=false to listVisibleDocIdSet (space-share excluded from the set)', async () => {
     isSpaceMemberMock.mockResolvedValue(false)
     vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue(['d_priv1'])
-    searchDocsMock.mockResolvedValue({ total: 0, items: [] })
+    searchDocsMock.mockResolvedValue({ total: 0, items: [], searchAfter: null })
     const res = mockRes()
     await searchDocsHandler(req({ body: { q: 'x' } }), res as never)
 
@@ -126,7 +127,7 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     // mocked, so here we assert the route pushes the empty visible set down.
     isSpaceMemberMock.mockResolvedValue(false)
     vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue([])
-    searchDocsMock.mockResolvedValue({ total: 0, items: [] })
+    searchDocsMock.mockResolvedValue({ total: 0, items: [], searchAfter: null })
     const res = mockRes()
     await searchDocsHandler(req({ body: { q: 'x' } }), res as never)
 
@@ -136,25 +137,52 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
     expect(osArg.visibleDocIds).toEqual([])
   })
 
-  it('pagination params (from/size) are passed to OS', async () => {
+  it('first page: no cursor => searchAfter undefined; nextCursor echoes searchDocs.searchAfter', async () => {
     isSpaceMemberMock.mockResolvedValue(true)
     vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue(['d1'])
-    searchDocsMock.mockResolvedValue({ total: 42, items: [] })
+    searchDocsMock.mockResolvedValue({ total: 42, items: [], searchAfter: [2.5, 'd1'] })
     const res = mockRes()
-    await searchDocsHandler(req({ body: { q: 'x', page: 3, pageSize: 10 } }), res as never)
+    await searchDocsHandler(req({ body: { q: 'x', pageSize: 10 } }), res as never)
 
     const osArg = searchDocsMock.mock.calls[0]![0]
-    // page 3, size 10 => from = (3-1)*10 = 20, size = 10.
-    expect(osArg.from).toBe(20)
+    // No cursor on the first request => search_after is not passed down.
+    expect(osArg.searchAfter).toBeUndefined()
     expect(osArg.size).toBe(10)
+    const body = res.body as { total: number; nextCursor?: string }
     // total is taken straight from OS hits.total.value.
-    expect((res.body as { total: number }).total).toBe(42)
+    expect(body.total).toBe(42)
+    // A returned searchAfter is wrapped into an opaque nextCursor.
+    expect(typeof body.nextCursor).toBe('string')
+    expect(decodeSearchCursor(body.nextCursor)).toEqual([2.5, 'd1'])
+  })
+
+  it('later page: a valid cursor is decoded and passed to searchDocs as searchAfter', async () => {
+    isSpaceMemberMock.mockResolvedValue(true)
+    vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue(['d1'])
+    searchDocsMock.mockResolvedValue({ total: 42, items: [], searchAfter: null })
+    const cursor = encodeSearchCursor([1.1, 'd7'])
+    const res = mockRes()
+    await searchDocsHandler(req({ body: { q: 'x', cursor, pageSize: 10 } }), res as never)
+
+    expect(res.statusCode).toBe(200)
+    expect(searchDocsMock.mock.calls[0]![0].searchAfter).toEqual([1.1, 'd7'])
+    // No further page => nextCursor omitted so the client stops.
+    expect((res.body as { nextCursor?: string }).nextCursor).toBeUndefined()
+  })
+
+  it('malformed cursor => 400 invalid_cursor, never touches the DB or OS', async () => {
+    const res = mockRes()
+    await searchDocsHandler(req({ body: { q: 'x', cursor: '!!!not-valid' } }), res as never)
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({ error: 'invalid_cursor' })
+    expect(docMetaRepo.listVisibleDocIdSet).not.toHaveBeenCalled()
+    expect(searchDocsMock).not.toHaveBeenCalled()
   })
 
   it('pageSize is clamped to config.search.pageSizeMax', async () => {
     isSpaceMemberMock.mockResolvedValue(true)
     vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue(['d1'])
-    searchDocsMock.mockResolvedValue({ total: 0, items: [] })
+    searchDocsMock.mockResolvedValue({ total: 0, items: [], searchAfter: null })
     const res = mockRes()
     await searchDocsHandler(req({ body: { q: 'x', pageSize: 9999 } }), res as never)
     expect(searchDocsMock.mock.calls[0]![0].size).toBe(mockConfig.search.pageSizeMax)
@@ -163,7 +191,7 @@ describe('POST /api/v1/docs/search — searchDocsHandler', () => {
   it('docType filter is passed to BOTH the MySQL constraint and OS', async () => {
     isSpaceMemberMock.mockResolvedValue(true)
     vi.mocked(docMetaRepo.listVisibleDocIdSet).mockResolvedValue(['d1'])
-    searchDocsMock.mockResolvedValue({ total: 0, items: [] })
+    searchDocsMock.mockResolvedValue({ total: 0, items: [], searchAfter: null })
     const res = mockRes()
     await searchDocsHandler(req({ body: { q: 'x', docType: ['doc', 'sheet'] } }), res as never)
     expect(res.statusCode).toBe(200)

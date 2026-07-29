@@ -26,7 +26,7 @@ import { buildDocShareUrl } from '../../util/docShareLink.js'
 import { config } from '../../config/env.js'
 import { getOctoIdentity } from '../../auth/octoIdentity.js'
 import { requireDocRole } from '../guard.js'
-import { searchDocs, VisibleTermsTooLargeError } from '../../search/osClient.js'
+import { searchDocs, VisibleTermsTooLargeError, encodeSearchCursor, decodeSearchCursor } from '../../search/osClient.js'
 
 export const docsRouter: ExpressRouter = Router()
 
@@ -352,8 +352,17 @@ docsRouter.get('/', listDocsHandler)
  * Registered BEFORE the '/:docId' routes so the '/search' literal is never
  * shadowed by the single-doc param route.
  *
- *   body: { q: string, docType?: string[], page?: number, pageSize?: number }
+ * Pagination is keyset (search_after), NOT offset: the client omits `cursor` on
+ * the first page and echoes back the response's `nextCursor` for each subsequent
+ * page. `nextCursor` is an opaque base64url token wrapping the last hit's sort
+ * values; it is absent once there is no further page, so the client's stop
+ * condition is simply "nextCursor missing" (never `page * size >= total`, which
+ * offset paging can get wrong under index churn). `total` is still an exact count
+ * for display, but no longer drives the stop.
+ *
+ *   body: { q: string, docType?: string[], cursor?: string, pageSize?: number }
  *   400 q required         q empty/missing
+ *   400 invalid_cursor     cursor present but malformed
  *   503 search unavailable search disabled, OR OpenSearch errored (never fail-open)
  */
 export async function searchDocsHandler(req: Request, res: Response) {
@@ -364,17 +373,25 @@ export async function searchDocsHandler(req: Request, res: Response) {
   }
   const uid = req.uid!
   const spaceId = req.spaceId!
-  const { q, docType: docTypeRaw, page: pageRaw, pageSize: pageSizeRaw } = req.body ?? {}
+  const { q, docType: docTypeRaw, cursor: cursorRaw, pageSize: pageSizeRaw } = req.body ?? {}
   if (typeof q !== 'string' || q.trim() === '') {
     res.status(400).json({ error: 'q required' })
+    return
+  }
+  // Decode the opaque keyset cursor (absent => first page). A malformed cursor is
+  // a client bug, not a transient failure — answer 400 rather than silently
+  // restarting from page one (mirrors listRecentHandler's invalid_cursor path).
+  let searchAfter
+  try {
+    searchAfter = decodeSearchCursor(typeof cursorRaw === 'string' ? cursorRaw : undefined) ?? undefined
+  } catch {
+    res.status(400).json({ error: 'invalid_cursor' })
     return
   }
   // Optional kind filter (§6.3): validated against the fixed doc_type enum;
   // unknown/absent => no filter. Pushed to both the MySQL constraint and OS filter.
   const docType = normalizeTypeFilter(docTypeRaw)
-  const page = Math.max(1, Number(pageRaw ?? 1) || 1)
   const pageSize = Math.min(config.search.pageSizeMax, Math.max(1, Number(pageSizeRaw ?? 20) || 20))
-  const from = (page - 1) * pageSize
   const ownedBots = req.ownedBots ?? []
   // Space-share visibility must match the list side: only a confirmed member of
   // the queried space sees its anyone_in_space docs (fail-closed on lookup error).
@@ -386,8 +403,8 @@ export async function searchDocsHandler(req: Request, res: Response) {
   const visibleDocIds = await docMetaRepo.listVisibleDocIdSet({ uid, spaceId, ownedBots, docType, isSpaceMember })
 
   // 2. OS: full-text match with the visibility constraint pushed down as a filter,
-  //    paginated by OS. Empty private set AND non-member short-circuits to total=0
-  //    inside searchDocs (no OS call). OS error => 503, never fail-open.
+  //    keyset-paginated by OS via search_after. Empty visible set short-circuits to
+  //    total=0 inside searchDocs (no OS call). OS error => 503, never fail-open.
   let result
   try {
     result = await searchDocs({
@@ -395,8 +412,8 @@ export async function searchDocsHandler(req: Request, res: Response) {
       query: q.trim(),
       docType,
       visibleDocIds,
-      from,
       size: pageSize,
+      searchAfter,
     })
   } catch (err) {
     // A visible set too large to push down as a terms filter is a deterministic,
@@ -412,6 +429,8 @@ export async function searchDocsHandler(req: Request, res: Response) {
 
   // Hits are already within the visibility constraint and carry their own display
   // metadata from OS _source — no MySQL round-trip, no role (§6.3 response).
+  // nextCursor is present only when searchDocs reported a further page; the client
+  // stops paginating as soon as it is absent.
   res.status(200).json({
     total: result.total,
     items: result.items.map((it) => ({
@@ -422,6 +441,7 @@ export async function searchDocsHandler(req: Request, res: Response) {
       spaceId: it.spaceId,
       ...(it.highlight ? { highlight: it.highlight } : {}),
     })),
+    ...(result.searchAfter ? { nextCursor: encodeSearchCursor(result.searchAfter) } : {}),
   })
 }
 
